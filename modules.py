@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import split_feature, pixels, compute_same_pad
-
+import ipdb
 
 def gaussian_p(mean, logs, x):
     """
@@ -261,6 +261,7 @@ class Split2d(nn.Module):
     def __init__(self, num_channels):
         super().__init__()
         self.conv = Conv2dZeros(num_channels // 2, num_channels)
+        self.use_last = False
 
     def split2d_prior(self, z):
         h = self.conv(z)
@@ -270,7 +271,12 @@ class Split2d(nn.Module):
         if reverse:
             z1 = input
             mean, logs = self.split2d_prior(z1)
-            z2 = gaussian_sample(mean, logs, temperature)
+            if self.use_last:
+                z2 = self._last_z2
+                self.use_last = False
+            else:
+                z2 = gaussian_sample(mean, logs, temperature)
+                self._last_z2 = z2.clone()
             z = torch.cat((z1, z2), dim=1)
             return z, logdet
         else:

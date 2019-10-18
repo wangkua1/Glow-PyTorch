@@ -159,6 +159,7 @@ class FlowNet(nn.Module):
         self.L = L
 
         H, W, C = image_shape
+        self.splits = []
 
         for i in range(L):
             # 1. Squeeze
@@ -179,7 +180,9 @@ class FlowNet(nn.Module):
 
             # 3. Split2d
             if i < L - 1:
-                self.layers.append(Split2d(num_channels=C))
+                split = Split2d(num_channels=C)
+                self.splits.append(split)
+                self.layers.append(split)
                 self.output_shapes.append([-1, C // 2, H, W])
                 C = C // 2
 
@@ -263,9 +266,9 @@ class Glow(nn.Module):
         return split_feature(h, "split")
 
     def forward(self, x=None, y_onehot=None, z=None, temperature=None,
-                reverse=False):
+                reverse=False, use_last_split=False):
         if reverse:
-            return self.reverse_flow(z, y_onehot, temperature)
+            return self.reverse_flow(z, y_onehot, temperature, use_last_split)
         else:
             return self.normal_flow(x, y_onehot)
 
@@ -289,11 +292,15 @@ class Glow(nn.Module):
 
         return z, bpd, y_logits
 
-    def reverse_flow(self, z, y_onehot, temperature):
+    def reverse_flow(self, z, y_onehot, temperature, use_last_split=False):
         with torch.no_grad():
             if z is None:
                 mean, logs = self.prior(z, y_onehot)
                 z = gaussian_sample(mean, logs, temperature)
+                self._last_z = z.clone()
+            if use_last_split:
+                for layer in self.flow.splits:
+                    layer.use_last = True
             x = self.flow(z, temperature=temperature, reverse=True)
         return x
 
