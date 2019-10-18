@@ -18,6 +18,43 @@ def get_block(in_channels, out_channels, hidden_channels):
                           Conv2dZeros(hidden_channels, out_channels))
     return block
 
+class LogitTransform(nn.Module):
+    """
+    The proprocessing step used in Real NVP:
+    y = sigmoid(x) - a / (1 - 2a)
+    x = logit(a + (1 - 2a)*y)
+    """
+
+    def __init__(self, alpha):
+        nn.Module.__init__(self)
+        self.alpha = alpha
+
+    def forward(self, input, logdet=None, reverse=False):
+        if not reverse:
+            return self._forward(input, logdet)
+        else:
+            return self._inverse(input, logdet)
+
+    def _forward(self, x, logpx=None):
+        s = self.alpha + (1 - 2 * self.alpha) * x
+        y = torch.log(s) - torch.log(1 - s)
+        if logpx is None:
+            return y
+        return y, logpx - self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
+
+    def _inverse(self, y, logpy=None):
+        x = (torch.sigmoid(y) - self.alpha) / (1 - 2 * self.alpha)
+        if logpy is None:
+            return x
+        return x, logpy + self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
+
+    def _logdetgrad(self, x):
+        s = self.alpha + (1 - 2 * self.alpha) * x
+        logdetgrad = -torch.log(s - s * s) + math.log(1 - 2 * self.alpha)
+        return logdetgrad
+
+    # def __repr__(self):
+    #     return ('{name}({alpha})'.format(name=self.__class__.__name__, **self.__dict__))
 
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
@@ -110,10 +147,12 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed):
+                 LU_decomposed, logittransform):
         super().__init__()
 
         self.layers = nn.ModuleList()
+        if logittransform:
+            self.layers.append(LogitTransform(1e-6))
         self.output_shapes = []
 
         self.K = K
@@ -165,10 +204,14 @@ class FlowNet(nn.Module):
         return z
 
 
+
+
+
+
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition):
+                 learn_top, y_condition,logittransform):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -177,7 +220,8 @@ class Glow(nn.Module):
                             actnorm_scale=actnorm_scale,
                             flow_permutation=flow_permutation,
                             flow_coupling=flow_coupling,
-                            LU_decomposed=LU_decomposed)
+                            LU_decomposed=LU_decomposed,
+                            logittransform=logittransform)
         self.y_classes = y_classes
         self.y_condition = y_condition
 

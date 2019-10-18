@@ -15,7 +15,7 @@ from ignite.engine import Engine, Events
 from ignite.handlers import ModelCheckpoint, Timer
 from ignite.metrics import RunningAverage, Loss
 
-from datasets import get_CIFAR10, get_SVHN
+from datasets import get_CIFAR10, get_SVHN, get_MNIST
 from model import Glow
 
 
@@ -24,7 +24,7 @@ def check_manual_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
 
-    print('Using seed: {seed}'.format(seed=seed))
+    myprint('Using seed: {seed}'.format(seed=seed))
 
 
 def check_dataset(dataset, dataroot, augment, download):
@@ -34,6 +34,10 @@ def check_dataset(dataset, dataroot, augment, download):
     if dataset == 'svhn':
         svhn = get_SVHN(augment, dataroot, download)
         input_size, num_classes, train_dataset, test_dataset = svhn
+
+    if dataset == 'mnist':
+        mnist = get_MNIST(False, dataroot, download)
+        input_size, num_classes, train_dataset, test_dataset = mnist
 
     return input_size, num_classes, train_dataset, test_dataset
 
@@ -76,7 +80,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh):
+         saved_optimizer, warmup, fresh,logittransform):
 
     device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
 
@@ -97,12 +101,12 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
-                 learn_top, y_condition)
+                 learn_top, y_condition,logittransform)
 
     model = model.to(device)
     optimizer = optim.Adamax(model.parameters(), lr=lr, weight_decay=5e-5)
 
-    lr_lambda = lambda epoch: lr * min(1., epoch / warmup)
+    lr_lambda = lambda epoch: lr * min(1., epoch+1 / warmup)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     def step(engine, batch):
@@ -223,7 +227,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
         losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
 
-        print(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
+        myprint(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
 
     timer = Timer(average=True)
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -237,19 +241,32 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     trainer.run(train_loader, epochs)
 
 
+def makedirs(dirname):
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
+
 if __name__ == '__main__':
+    """ 
+    python train.py \
+    --output_dir /scratch/gobi2/wangkuan/glow/cifar10
+
+    python train.py --no_learn_top --dataset mnist --L 2 \
+    --hidden_channels 128 --lr 1e-3 \
+    --flow_permutation reverse \
+    --flow_coupling additive \
+    --output_dir /scratch/gobi2/wangkuan/glow/db --fresh
+    """
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--dataset', type=str,
-                        default='cifar10', choices=['cifar10', 'svhn'],
+                        default='cifar10', choices=['cifar10', 'svhn', 'mnist'],
                         help='Type of the dataset to be used.')
 
     parser.add_argument('--dataroot',
-                        type=str, default='./',
+                        type=str, default='/scratch/gobi2/wangkuan/data',
                         help='path to dataset')
 
-    parser.add_argument('--download', action='store_true',
-                        help='downloads dataset')
+    parser.add_argument('--download', default=True)
 
     parser.add_argument('--no_augment', action='store_false',
                         dest='augment', help='Augment training data')
@@ -321,7 +338,7 @@ if __name__ == '__main__':
                         help='initial learning rate')
 
     parser.add_argument('--warmup',
-                        type=float, default=5,
+                        type=float, default=1,
                         help='Warmup learning rate linearly per epoch')
 
     parser.add_argument('--warmup_steps',
@@ -338,7 +355,7 @@ if __name__ == '__main__':
                         help='disables cuda')
 
     parser.add_argument('--output_dir',
-                        default='output/',
+                        default='/scratch/gobi2/wangkuan/glow/',
                         help='directory to output logs and model checkpoints')
 
     parser.add_argument('--fresh',
@@ -356,9 +373,13 @@ if __name__ == '__main__':
     parser.add_argument('--seed',
                         type=int, default=0,
                         help='manual seed')
+    parser.add_argument('--logittransform',
+                        action='store_true')
 
     args = parser.parse_args()
     kwargs = vars(args)
+
+    makedirs(args.dataroot)
 
     try:
         os.makedirs(args.output_dir)
@@ -372,4 +393,13 @@ if __name__ == '__main__':
     with open(os.path.join(args.output_dir, 'hparams.json'), 'w') as fp:
         json.dump(kwargs, fp, sort_keys=True, indent=4)
 
+    log_file = os.path.join(args.output_dir, 'log.txt')
+    log = open(log_file, 'w')
+
+    def myprint(*content):
+        print(*content)
+        print(*content, file=log)
+        log.flush()
+
     main(**kwargs)
+    log.close()
