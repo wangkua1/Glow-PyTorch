@@ -14,6 +14,19 @@ python train.py  \
     --sn \
     --output_dir /scratch/gobi2/wangkuan/glow/db-gan-sn
 
+python train.py  \
+    --fresh  \
+    --dataset mnist  \
+    --L 3  \
+    --K 16 \
+    --hidden_channels 128  \
+    --batch_size 32 \
+    --lr 1e-3  \
+    --flow_permutation reverse   \
+    --flow_coupling additive  \
+    --sn \
+    --output_dir /scratch/gobi2/wangkuan/glow/db-mle-sn
+
     python train.py  \
     --fresh  \
     --gan  \
@@ -309,8 +322,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         trainer = Engine(gan_step)
     else:
         trainer = Engine(step)
-    checkpoint_handler = ModelCheckpoint(output_dir, 'glow', save_interval=1,
-                                         n_saved=2, require_empty=False)
+    checkpoint_handler = ModelCheckpoint(output_dir, 'glow', save_interval=5,
+                                         n_saved=1000, require_empty=False)
 
     trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler,
                               {'model': model, 'optimizer': optimizer})
