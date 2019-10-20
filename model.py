@@ -2,15 +2,23 @@ import math
 
 import torch
 import torch.nn as nn
-
+import ipdb
 from modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
                      Permute2d, LinearZeros, SqueezeLayer,
                      Split2d, gaussian_likelihood, gaussian_sample)
 from utils import split_feature, uniform_binning_correction
-
-
-def get_block(in_channels, out_channels, hidden_channels):
-    block = nn.Sequential(Conv2d(in_channels, hidden_channels),
+from spectral_norm_adaptive import SpectralNormConv2d
+def get_block(in_channels, out_channels, hidden_channels, sn=False):
+    if sn:
+        block =  nn.Sequential(
+            SpectralNormConv2d(in_channels, hidden_channels, 3, stride=1, padding=1,coeff=1),
+            nn.ReLU(inplace=False),
+            SpectralNormConv2d(hidden_channels, hidden_channels, 3, stride=1, padding=1,coeff=1),
+            nn.ReLU(inplace=False),
+            SpectralNormConv2d(hidden_channels, out_channels, 3, stride=1, padding=1,coeff=1)
+            )
+    else:
+        block = nn.Sequential(Conv2d(in_channels, hidden_channels),
                           nn.ReLU(inplace=False),
                           Conv2d(hidden_channels, hidden_channels,
                                  kernel_size=(1, 1)),
@@ -39,13 +47,14 @@ class LogitTransform(nn.Module):
         s = self.alpha + (1 - 2 * self.alpha) * x
         y = torch.log(s) - torch.log(1 - s)
         if logpx is None:
-            return y
+            return y, None
         return y, logpx - self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
 
     def _inverse(self, y, logpy=None):
+        # ipdb.set_trace()
         x = (torch.sigmoid(y) - self.alpha) / (1 - 2 * self.alpha)
         if logpy is None:
-            return x
+            return x, None
         return x, logpy + self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
 
     def _logdetgrad(self, x):
@@ -58,7 +67,7 @@ class LogitTransform(nn.Module):
 
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
-                 flow_permutation, flow_coupling, LU_decomposed):
+                 flow_permutation, flow_coupling, LU_decomposed, sn):
         super().__init__()
         self.flow_coupling = flow_coupling
 
@@ -83,11 +92,13 @@ class FlowStep(nn.Module):
         if flow_coupling == "additive":
             self.block = get_block(in_channels // 2,
                                    in_channels // 2,
-                                   hidden_channels)
+                                   hidden_channels,
+                                   sn)
         elif flow_coupling == "affine":
             self.block = get_block(in_channels // 2,
                                    in_channels,
-                                   hidden_channels)
+                                   hidden_channels,
+                                   sn)
 
     def forward(self, input, logdet=None, reverse=False):
         if not reverse:
@@ -147,7 +158,7 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed, logittransform):
+                 LU_decomposed, logittransform, sn):
         super().__init__()
 
         self.layers = nn.ModuleList()
@@ -175,7 +186,8 @@ class FlowNet(nn.Module):
                              actnorm_scale=actnorm_scale,
                              flow_permutation=flow_permutation,
                              flow_coupling=flow_coupling,
-                             LU_decomposed=LU_decomposed))
+                             LU_decomposed=LU_decomposed,
+                             sn=sn))
                 self.output_shapes.append([-1, C, H, W])
 
             # 3. Split2d
@@ -214,7 +226,7 @@ class FlowNet(nn.Module):
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition,logittransform):
+                 learn_top, y_condition,logittransform,sn):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -224,7 +236,8 @@ class Glow(nn.Module):
                             flow_permutation=flow_permutation,
                             flow_coupling=flow_coupling,
                             LU_decomposed=LU_decomposed,
-                            logittransform=logittransform)
+                            logittransform=logittransform,
+                            sn=sn)
         self.y_classes = y_classes
         self.y_condition = y_condition
 
@@ -246,12 +259,12 @@ class Glow(nn.Module):
                                           self.flow.output_shapes[-1][2],
                                           self.flow.output_shapes[-1][3]]))
 
-    def prior(self, data, y_onehot=None):
+    def prior(self, data, y_onehot=None,batch_size=0):
         if data is not None:
             h = self.prior_h.repeat(data.shape[0], 1, 1, 1)
         else:
             # Hardcoded a batch size of 32 here
-            h = self.prior_h.repeat(32, 1, 1, 1)
+            h = self.prior_h.repeat(batch_size, 1, 1, 1)
 
         channels = h.size(1)
 
@@ -266,9 +279,9 @@ class Glow(nn.Module):
         return split_feature(h, "split")
 
     def forward(self, x=None, y_onehot=None, z=None, temperature=None,
-                reverse=False, use_last_split=False):
+                reverse=False, use_last_split=False,batch_size=0):
         if reverse:
-            return self.reverse_flow(z, y_onehot, temperature, use_last_split)
+            return self.reverse_flow(z, y_onehot, temperature, use_last_split,batch_size)
         else:
             return self.normal_flow(x, y_onehot)
 
@@ -292,16 +305,16 @@ class Glow(nn.Module):
 
         return z, bpd, y_logits
 
-    def reverse_flow(self, z, y_onehot, temperature, use_last_split=False):
-        with torch.no_grad():
-            if z is None:
-                mean, logs = self.prior(z, y_onehot)
-                z = gaussian_sample(mean, logs, temperature)
-                self._last_z = z.clone()
-            if use_last_split:
-                for layer in self.flow.splits:
-                    layer.use_last = True
-            x = self.flow(z, temperature=temperature, reverse=True)
+    def reverse_flow(self, z, y_onehot, temperature, use_last_split=False, batch_size=0):
+        # with torch.no_grad():
+        if z is None:
+            mean, logs = self.prior(z, y_onehot, batch_size=batch_size)
+            z = gaussian_sample(mean, logs, temperature)
+            self._last_z = z.clone()
+        if use_last_split:
+            for layer in self.flow.splits:
+                layer.use_last = True
+        x = self.flow(z, temperature=temperature, reverse=True)
         return x
 
     def set_actnorm_init(self):

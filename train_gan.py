@@ -1,35 +1,17 @@
 """
-python train.py  \
-    --fresh  \
-    --dataset mnist  \
-    --L 3  \
-    --K 16 \
-    --hidden_channels 128  \
-    --batch_size 32 \
-    --lr 1e-5  \
-    --disc_lr 1e-4 \
-    --flow_permutation reverse   \
-    --flow_coupling additive  \
-    --gan  \
-    --sn \
-    --output_dir /scratch/gobi2/wangkuan/glow/db-gan-sn
-
-    python train.py  \
-    --fresh  \
-    --gan  \
-    --dataset mnist  \
-    --L 3  \
-    --K ${K} \
-    --hidden_channels ${H}  \
-    --batch_size 32 \
-    --lr ${lr}  \
-    --disc_lr ${disc_lr} \
-    --flow_permutation reverse   \
-    --flow_coupling additive  \
-    --no_learn_top \
-    --output_dir /scratch/gobi2/wangkuan/glow/gans1/simple-${H}-${K}-${lr}-${disc_lr} &
-
-
+python train.py      
+--fresh      
+--dataset mnist      
+--L 3      
+--K 32     
+--hidden_channels 128      
+--batch_size 64     
+--lr 1e-5      
+--disc_lr 1e-4     
+--flow_permutation reverse       
+--flow_coupling affine      
+--gan      
+--output_dir /scratch/gobi2/wangkuan/glow/db-gan2
 """
 import argparse
 import os
@@ -131,7 +113,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr):
 
     device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
 
@@ -152,11 +134,15 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
-                 learn_top, y_condition,logittransform,sn)
+                 learn_top, y_condition,logittransform)
 
     model = model.to(device)
     
     if gan:
+        # Debug
+        model = mine.Generator(32, 1).to(device)
+
+
         optimizer = optim.Adam(model.parameters(), lr=lr, betas=(.5, .99), weight_decay=0)
         discriminator = mine.Discriminator(image_shape[-1])
         discriminator = discriminator.to(device)
@@ -211,15 +197,20 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         x = x.to(device)
 
         
-        def generate_from_noise(batch_size):
-            _, c2, h, w  = model.prior_h.shape
-            c = c2 // 2
-            zshape = (batch_size, c, h, w)
-            randz  = torch.randn(zshape).to(device)
-            randz  = torch.autograd.Variable(randz, requires_grad=True)
-            images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=batch_size)   
-            return images
+        # def generate_from_noise(batch_size):
+        #     _, c2, h, w  = model.prior_h.shape
+        #     c = c2 // 2
+        #     zshape = (batch_size, c, h, w)
+        #     randz  = torch.autograd.Variable(torch.randn(zshape), requires_grad=True).to(device)
+        #     images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=batch_size)   
+        #     return images
 
+        def generate_from_noise(batch_size):
+
+            zshape = (batch_size, 32, 1,1)
+            randz  = torch.randn(zshape).to(device)
+            images = model(randz)   
+            return images / 2
 
         def run_noised_disc(discriminator, x):
             x = uniform_binning_correction(x)[0]
@@ -257,19 +248,12 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         optimizer.zero_grad()
         losses['total_loss'].backward()
         params = list(model.parameters())
-        # gnorm = [p.grad.norm() for p in params]
-        nparams = list(model.named_parameters())
-        no_grad_names = []
-        for name, param in nparams:
-            if param.grad is None:
-                no_grad_names.append(name)
-            # got these:['learn_top_fn.logs', 'learn_top_fn.conv.weight', 'learn_top_fn.conv.bias']
+        gnorm = [p.grad.norm() for p in params]
         optimizer.step()
-        # Got NaN after some iterations
-        if max_grad_clip > 0:
-            torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        # if max_grad_clip > 0:
+        #     torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
+        # if max_grad_norm > 0:
+        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
 
         if engine.iter_ind  % 50==0:
@@ -349,40 +333,40 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             engine.state.epoch = resume_epoch
             engine.state.iteration = resume_epoch * len(engine.state.dataloader)
 
-    @trainer.on(Events.STARTED)
-    def init(engine):
-        model.train()
+    # @trainer.on(Events.STARTED)
+    # def init(engine):
+    #     model.train()
 
-        init_batches = []
-        init_targets = []
+    #     init_batches = []
+    #     init_targets = []
 
-        with torch.no_grad():
-            for batch, target in islice(train_loader, None,
-                                        n_init_batches):
-                init_batches.append(batch)
-                init_targets.append(target)
+    #     with torch.no_grad():
+    #         for batch, target in islice(train_loader, None,
+    #                                     n_init_batches):
+    #             init_batches.append(batch)
+    #             init_targets.append(target)
 
-            init_batches = torch.cat(init_batches).to(device)
+    #         init_batches = torch.cat(init_batches).to(device)
 
-            assert init_batches.shape[0] == n_init_batches * batch_size
+    #         assert init_batches.shape[0] == n_init_batches * batch_size
 
-            if y_condition:
-                init_targets = torch.cat(init_targets).to(device)
-            else:
-                init_targets = None
+    #         if y_condition:
+    #             init_targets = torch.cat(init_targets).to(device)
+    #         else:
+    #             init_targets = None
 
-            model(init_batches, init_targets)
+    #         model(init_batches, init_targets)
 
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def evaluate(engine):
-        evaluator.run(test_loader)
+    # @trainer.on(Events.EPOCH_COMPLETED)
+    # def evaluate(engine):
+    #     evaluator.run(test_loader)
 
-        # scheduler.step()
-        metrics = evaluator.state.metrics
+    #     # scheduler.step()
+    #     metrics = evaluator.state.metrics
 
-        losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
+    #     losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
 
-        myprint(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
+    #     myprint(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
 
     timer = Timer(average=True)
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -531,8 +515,6 @@ if __name__ == '__main__':
     parser.add_argument('--logittransform',
                         action='store_true')
     parser.add_argument('--gan',
-                        action='store_true')
-    parser.add_argument('--sn',
                         action='store_true')
     parser.add_argument('--disc_lr',
                         type=float, default=1e-5)
