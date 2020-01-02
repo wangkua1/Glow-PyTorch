@@ -1,46 +1,19 @@
 """
 python train.py  \
     --fresh  \
+    --gan  \
     --dataset mnist  \
     --L 3  \
-    --K 16 \
+    --K 4 \
     --hidden_channels 128  \
     --batch_size 32 \
     --lr 1e-5  \
     --disc_lr 1e-4 \
     --flow_permutation reverse   \
     --flow_coupling additive  \
-    --gan  \
-    --sn \
-    --output_dir /scratch/gobi2/wangkuan/glow/db-gan-sn
-
-python train.py  \
-    --fresh  \
-    --dataset mnist  \
-    --L 3  \
-    --K 16 \
-    --hidden_channels 128  \
-    --batch_size 32 \
-    --lr 1e-3  \
-    --flow_permutation reverse   \
-    --flow_coupling additive  \
-    --sn \
-    --output_dir /scratch/gobi2/wangkuan/glow/db-mle-sn
-
-    python train.py  \
-    --fresh  \
-    --gan  \
-    --dataset mnist  \
-    --L 3  \
-    --K ${K} \
-    --hidden_channels ${H}  \
-    --batch_size 32 \
-    --lr ${lr}  \
-    --disc_lr ${disc_lr} \
-    --flow_permutation reverse   \
-    --flow_coupling additive  \
     --no_learn_top \
-    --output_dir /scratch/gobi2/wangkuan/glow/gans1/simple-${H}-${K}-${lr}-${disc_lr} &
+    --sn 0 \
+    --output_dir /scratch/gobi2/wangkuan/glow/rebuttal-guess/db
 
 
 """
@@ -68,6 +41,9 @@ import mine
 import matplotlib.pyplot as plt
 import ipdb
 from utils import uniform_binning_correction
+from recon_mnist import run_recon_evolution
+from inception_score import inception_score
+from csv_logger import CSVLogger, plot_csv
 
 def check_manual_seed(seed):
     seed = seed or random.randint(1, 10000)
@@ -177,6 +153,11 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     else:
         optimizer = optim.Adamax(model.parameters(), lr=lr, weight_decay=5e-5)
 
+    iteration_fieldnames = ['global_iteration', 'is']
+    iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
+                             filename=os.path.join(output_dir, 'iteration_log.csv'))
+
+
 
 
     # lr_lambda = lambda epoch: lr * min(1., epoch+1 / warmup)
@@ -184,6 +165,11 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     i = 0
     def step(engine, batch):
+        if 'iter_ind' in dir(engine):
+            engine.iter_ind += 1
+        else:
+            engine.iter_ind = -1
+        
         model.train()
         optimizer.zero_grad()
 
@@ -206,6 +192,18 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
         optimizer.step()
+        if engine.iter_ind  % 100==0:
+            sample = model(y_onehot=None, temperature=1, batch_size=30, reverse=True)
+            grid = make_grid((postprocess(sample.detach().cpu())[:30]), nrow=6).permute(1,2,0)
+            plt.figure(figsize=(10,10))
+            plt.imshow(grid)
+            plt.axis('off')
+            plt.savefig(os.path.join(output_dir, f'flow_sample_{engine.iter_ind}.png'))
+        if engine.iter_ind  % 500==0:
+            # plot recon
+            fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
+            pad = run_recon_evolution(model, x, fpath)
+            myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
 
         return losses
 
@@ -285,18 +283,44 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
 
-        if engine.iter_ind  % 50==0:
+        if engine.iter_ind  % 100==0:
             grid = make_grid((postprocess(fake.detach().cpu())[:30]), nrow=6).permute(1,2,0)
             plt.figure(figsize=(10,10))
             plt.imshow(grid)
             plt.axis('off')
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
-            grid = make_grid((postprocess(uniform_binning_correction(x)[0].cpu())[:30]), nrow=6).permute(1,2,0)
-            plt.figure(figsize=(10,10))
-            plt.imshow(grid)
-            plt.axis('off')
-            plt.savefig(os.path.join(output_dir, f'data_{engine.iter_ind}.png'))
+            # grid = make_grid((postprocess(uniform_binning_correction(x)[0].cpu())[:30]), nrow=6).permute(1,2,0)
+            # plt.figure(figsize=(10,10))
+            # plt.imshow(grid)
+            # plt.axis('off')
+            # plt.savefig(os.path.join(output_dir, f'data_{engine.iter_ind}.png'))
+
+        if engine.iter_ind  % 500==0:
+            # plot recon
+            fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
+            pad = run_recon_evolution(model, x, fpath)
+            myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
+
+            # Inception score
+            fake = torch.cat([generate_from_noise(100) for _ in range(20)],0 )
+            x_is = 2*fake
+            x_is = x_is.repeat(1,3,1,1).detach()
+            with torch.no_grad():
+                iss = inception_score(x_is, cuda=True, batch_size=32, resize=True, splits=10)[0]
+            myprint(f'IS: {iss}, global_iter: {engine.iter_ind}')
+            stats_dict = {
+                    'global_iteration': engine.iter_ind ,
+                    'is': iss
+            }
+            iteration_logger.writerow(stats_dict)
+            try:
+                plot_csv(iteration_logger.filename)
+            except:
+                pass
+            ipdb.set_trace()
+            
+
 
         return losses
 
@@ -545,8 +569,7 @@ if __name__ == '__main__':
                         action='store_true')
     parser.add_argument('--gan',
                         action='store_true')
-    parser.add_argument('--sn',
-                        action='store_true')
+    parser.add_argument('--sn', type=int, default=0)
     parser.add_argument('--disc_lr',
                         type=float, default=1e-5)
 
@@ -563,6 +586,7 @@ if __name__ == '__main__':
             os.makedirs(args.output_dir)
         if (not os.path.isdir(args.output_dir)) or (len(os.listdir(args.output_dir)) > 0):
             raise FileExistsError("Please provide a path to a non-existing or empty directory. Alternatively, pass the --fresh flag.")
+    os.makedirs(os.path.join(args.output_dir, '_recon'))
 
     with open(os.path.join(args.output_dir, 'hparams.json'), 'w') as fp:
         json.dump(kwargs, fp, sort_keys=True, indent=4)

@@ -39,9 +39,10 @@ class LogitTransform(nn.Module):
 
     def forward(self, input, logdet=None, reverse=False):
         if not reverse:
-            return self._forward(input, logdet)
+            return self._forward(input + .5, logdet)
         else:
-            return self._inverse(input, logdet)
+            output, logdet = self._inverse(input, logdet)
+            return output-.5, logdet
 
     def _forward(self, x, logpx=None):
         s = self.alpha + (1 - 2 * self.alpha) * x
@@ -281,6 +282,7 @@ class Glow(nn.Module):
     def forward(self, x=None, y_onehot=None, z=None, temperature=None,
                 reverse=False, use_last_split=False,batch_size=0):
         if reverse:
+            assert z is not None or batch_size > 0
             return self.reverse_flow(z, y_onehot, temperature, use_last_split,batch_size)
         else:
             return self.normal_flow(x, y_onehot)
