@@ -336,7 +336,7 @@ class Split2d(nn.Module):
                 self.use_last = False
             else:
                 z2 = gaussian_sample(mean, logs, temperature)
-                self._last_z2 = z2.clone()
+                self._last_z2 = z2#.clone()
             z = torch.cat((z1, z2), dim=1)
             return z, logdet
         else:

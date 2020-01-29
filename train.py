@@ -42,7 +42,7 @@ import matplotlib.pyplot as plt
 import ipdb
 from utils import uniform_binning_correction
 from recon_mnist import run_recon_evolution
-from inception_score import inception_score
+from inception_score import inception_score, run_fid
 from csv_logger import CSVLogger, plot_csv
 
 def check_manual_seed(seed):
@@ -92,6 +92,51 @@ def compute_loss(nll, reduction='mean'):
 
     return losses
 
+def compute_jacobian_regularizer(x, z, n_proj=1):
+    """
+        x: A minibatch of examples
+        z: Model outputs
+        n_proj: number of random projections
+    """
+    x_flat = x.view(x.size(0), -1)  # (128, 3072)
+    z_flat = z.view(z.size(0), -1)  # (128, 3072)
+    batch_size, C = x_flat.size()  # batch_size=128, C=3072
+    J_f = 0
+
+    for i in range(n_proj):
+        v_c = torch.randn(size=(batch_size, C), device=x.device)  # (128, 3072)
+        v = v_c / (torch.norm(v_c, dim=1).unsqueeze(1) + 1e-6)
+
+
+        z_vec = z.view(-1)
+        v_vec = v.view(-1)
+
+        Jv = torch.autograd.grad(torch.matmul(z_vec, v_vec), x, create_graph=True)[0] 
+        # J_f += torch.norm(Jv)**2
+        J_f += torch.norm(Jv)
+
+    return J_f
+
+def compute_jacobian_regularizer_manyinputs(xs, z, n_proj=1):
+    """
+        x: A minibatch of examples
+        z: Model outputs
+        n_proj: number of random projections
+    """
+    J_f = 0
+    for x in xs:
+        z_flat = z.view(z.size(0), -1)  # (128, large)
+        for i in range(n_proj):
+            v_c = torch.randn(size=z_flat.size(), device=x.device)  
+            v = v_c / (torch.norm(v_c, dim=1).unsqueeze(1) + 1e-6)
+            z_vec = z.view(-1)
+            v_vec = v.view(-1)
+
+            Jv = torch.autograd.grad(torch.matmul(z_vec, v_vec), x, create_graph=True)[0] 
+            # Jv = torch.autograd.grad(torch.matmul(z_vec, v_vec), x, create_graph=True)[0] 
+            # J_f += torch.norm(Jv)**2
+            J_f += torch.norm(Jv)
+    return J_f
 
 def compute_loss_y(nll, y_logits, y_weight, y, multi_class, reduction='mean'):
     if reduction == 'mean':
@@ -115,12 +160,18 @@ def compute_loss_y(nll, y_logits, y_weight, y, multi_class, reduction='mean'):
     return losses
 
 
+def cycle(loader):
+    while True:
+        for data in loader:
+            yield data
+
+
 def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          epochs, saved_model, seed, hidden_channels, K, L, actnorm_scale,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda):
 
     device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
 
@@ -138,7 +189,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     test_loader = data.DataLoader(test_dataset, batch_size=eval_batch_size,
                                   shuffle=False, num_workers=n_workers,
                                   drop_last=False)
-
+    test_iter = cycle(test_loader)
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
                  learn_top, y_condition,logittransform,sn)
@@ -153,59 +204,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     else:
         optimizer = optim.Adamax(model.parameters(), lr=lr, weight_decay=5e-5)
 
-    iteration_fieldnames = ['global_iteration', 'is']
+    iteration_fieldnames = ['global_iteration', 'fid','sample_pad', 'bpd','pad','real_acc','fake_acc','acc']
     iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'iteration_log.csv'))
 
-
-
-
-    # lr_lambda = lambda epoch: lr * min(1., epoch+1 / warmup)
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
-    i = 0
-    def step(engine, batch):
-        if 'iter_ind' in dir(engine):
-            engine.iter_ind += 1
-        else:
-            engine.iter_ind = -1
-        
-        model.train()
-        optimizer.zero_grad()
-
-        x, y = batch
-        x = x.to(device)
-
-        if y_condition:
-            y = y.to(device)
-            z, nll, y_logits = model(x, y)
-            losses = compute_loss_y(nll, y_logits, y_weight, y, multi_class)
-        else:
-            z, nll, y_logits = model(x, None)
-            losses = compute_loss(nll)
-
-        losses['total_loss'].backward()
-
-        if max_grad_clip > 0:
-            torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-        optimizer.step()
-        if engine.iter_ind  % 100==0:
-            sample = model(y_onehot=None, temperature=1, batch_size=30, reverse=True)
-            grid = make_grid((postprocess(sample.detach().cpu())[:30]), nrow=6).permute(1,2,0)
-            plt.figure(figsize=(10,10))
-            plt.imshow(grid)
-            plt.axis('off')
-            plt.savefig(os.path.join(output_dir, f'flow_sample_{engine.iter_ind}.png'))
-        if engine.iter_ind  % 500==0:
-            # plot recon
-            fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
-            pad = run_recon_evolution(model, x, fpath)
-            myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
-
-        return losses
 
     def gan_step(engine, batch):
         assert not y_condition
@@ -216,7 +218,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         losses = {}
         model.train()
         discriminator.train()
-        
+        optimizer.zero_grad()
+
 
         x, y = batch
         x = x.to(device)
@@ -245,8 +248,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         ones_target = torch.ones((x.size(0), 1), device=x.device)
         zeros_target = torch.zeros((x.size(0), 1), device=x.device)
 
-        # D_real_accuracy = torch.sum(torch.round(F.sigmoid(D_real_scores)) == ones_target).float() / ones_target.size(0)
-        # D_fake_accuracy = torch.sum(torch.round(F.sigmoid(D_fake_scores)) == zeros_target).float() / zeros_target.size(0)
+        D_real_accuracy = torch.sum(torch.round(F.sigmoid(D_real_scores)) == ones_target).float() / ones_target.size(0)
+        D_fake_accuracy = torch.sum(torch.round(F.sigmoid(D_fake_scores)) == zeros_target).float() / zeros_target.size(0)
 
         D_real_loss = F.binary_cross_entropy_with_logits(D_real_scores, ones_target)
         D_fake_loss = F.binary_cross_entropy_with_logits(D_fake_scores, zeros_target)
@@ -262,25 +265,47 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         # Train generator
         fake = generate_from_noise(x.size(0))
         G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
-        losses['total_loss'] = G_loss
+        
+        
 
-        # G-step
-        optimizer.zero_grad()
-        losses['total_loss'].backward()
-        params = list(model.parameters())
-        # gnorm = [p.grad.norm() for p in params]
-        nparams = list(model.named_parameters())
-        no_grad_names = []
-        for name, param in nparams:
-            if param.grad is None:
-                no_grad_names.append(name)
-            # got these:['learn_top_fn.logs', 'learn_top_fn.conv.weight', 'learn_top_fn.conv.bias']
-        optimizer.step()
-        # Got NaN after some iterations
+
+        z, nll, y_logits, (prior, logdet)= model.forward(x, None, return_details=True)
+        nll = nll.mean()
+        
+
+
+        loss =   weight_gan * G_loss \
+                +weight_prior * -prior.mean() \
+                +weight_logdet * -logdet.mean()
+        # Jac Reg
+        if jac_reg_lambda > 0:
+            x_samples = generate_from_noise(args.batch_size).detach()
+            x_samples.requires_grad_()
+            z, _, _, (_, logdet_sample) = model.forward(x_samples, None, return_details=True)
+            other_zs = torch.cat([split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits],-1)
+            all_z = torch.cat([other_zs, z.view(x.size(0),-1)], -1)
+            foward_jac = compute_jacobian_regularizer(x_samples, all_z, n_proj=1)
+            foward_jac= 0
+            _, c2, h, w  = model.prior_h.shape
+            c = c2 // 2
+            zshape = (batch_size, c, h, w)
+            randz  = torch.randn(zshape).to(device)
+            randz  = torch.autograd.Variable(randz, requires_grad=True)
+            images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=0) 
+            other_zs = [split._last_z2 for  split  in model.flow.splits]
+            all_z = [randz] + other_zs
+            inverse_jac = compute_jacobian_regularizer_manyinputs(all_z, images, n_proj=1)
+
+            loss = loss + jac_reg_lambda * (foward_jac + inverse_jac)
+
+        loss.backward()
+
         if max_grad_clip > 0:
             torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
         if max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+        optimizer.step()
 
 
         if engine.iter_ind  % 100==0:
@@ -290,38 +315,49 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             plt.axis('off')
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
-            # grid = make_grid((postprocess(uniform_binning_correction(x)[0].cpu())[:30]), nrow=6).permute(1,2,0)
-            # plt.figure(figsize=(10,10))
-            # plt.imshow(grid)
-            # plt.axis('off')
-            # plt.savefig(os.path.join(output_dir, f'data_{engine.iter_ind}.png'))
+        if engine.iter_ind  % eval_every==0:
+            torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
 
-        if engine.iter_ind  % 500==0:
-            # plot recon
-            fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
-            pad = run_recon_evolution(model, x, fpath)
-            myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
-
-            # Inception score
-            fake = torch.cat([generate_from_noise(100) for _ in range(20)],0 )
-            x_is = 2*fake
-            x_is = x_is.repeat(1,3,1,1).detach()
             with torch.no_grad():
-                iss = inception_score(x_is, cuda=True, batch_size=32, resize=True, splits=10)[0]
-            myprint(f'IS: {iss}, global_iter: {engine.iter_ind}')
-            stats_dict = {
-                    'global_iteration': engine.iter_ind ,
-                    'is': iss
-            }
-            iteration_logger.writerow(stats_dict)
-            try:
+                # plot recon
+                fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
+                
+                sample_pad = run_recon_evolution(model, generate_from_noise(args.batch_size).detach(), fpath)
+                myprint(f"Iter: {engine.iter_ind}, Recon Sample PAD: {sample_pad}")
+
+                pad = run_recon_evolution(model, x, fpath)
+                myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
+
+                # Inception score
+                N = 200
+                sample = torch.cat([generate_from_noise(args.batch_size) for _ in range(200//args.batch_size+1)],0 )[:N]
+                sample = sample + .5
+                
+                x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
+                x_real = x_real + .5
+                if (sample!=sample).float().sum() > 0:
+                    myprint("Sample NaNs")
+                    raise
+
+                fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
+                myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
+                stats_dict = {
+                        'global_iteration': engine.iter_ind ,
+                        'fid': fid,
+                        'bpd': torch.mean(nll).item(),
+                        'pad': pad.item(),
+                        'sample_pad': sample_pad.item(),
+                        'real_acc': D_real_accuracy.item(),
+                        'fake_acc': D_fake_accuracy.item(),
+                        'acc': .5*(D_fake_accuracy.item()+D_real_accuracy.item())
+                }
+                iteration_logger.writerow(stats_dict)
                 plot_csv(iteration_logger.filename)
-            except:
-                pass
-            ipdb.set_trace()
             
-
-
+            
+                
+        # Dummy
+        losses['total_loss'] = 0
         return losses
 
 
@@ -342,10 +378,9 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 losses = compute_loss(nll, reduction='none')
 
         return losses
-    if gan:
-        trainer = Engine(gan_step)
-    else:
-        trainer = Engine(step)
+    trainer = Engine(gan_step)
+    # else:
+    #     trainer = Engine(step)
     checkpoint_handler = ModelCheckpoint(output_dir, 'glow', save_interval=5,
                                          n_saved=1000, require_empty=False)
 
@@ -570,6 +605,13 @@ if __name__ == '__main__':
     parser.add_argument('--gan',
                         action='store_true')
     parser.add_argument('--sn', type=int, default=0)
+    parser.add_argument('--flowgan', type=int, default=0)
+    parser.add_argument('--eval_every', type=int, default=500)
+    parser.add_argument('--weight_gan', type=float, default=0)
+    parser.add_argument('--ld_on_samples', type=int, default=0)
+    parser.add_argument('--weight_prior', type=float, default=0)
+    parser.add_argument('--weight_logdet', type=float, default=0)
+    parser.add_argument('--jac_reg_lambda', type=float, default=0)
     parser.add_argument('--disc_lr',
                         type=float, default=1e-5)
 

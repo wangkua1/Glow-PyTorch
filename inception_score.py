@@ -168,6 +168,27 @@ def calculate_activation_statistics(act):
     sigma = np.cov(act, rowvar=False)
     return mu, sigma
 
+
+def run_fid(data, sample):
+    assert data.max() <=1 and  data.min() >= 0
+    assert sample.max() <=1 and  sample.min() >= 0
+    data = 2*data - 1
+    data = data.repeat(1,3,1,1).detach()      
+    with torch.no_grad():
+        iss, _, _, acts_real = inception_score(data, cuda=True, batch_size=32, resize=True, splits=10, return_preds=True)
+    sample = 2*sample - 1
+    sample = sample.repeat(1,3,1,1).detach()
+
+    with torch.no_grad():
+        issf, _, _, acts_fake = inception_score(sample, cuda=True, batch_size=32, resize=True, splits=10, return_preds=True)
+    # idxs_ = np.argsort(np.abs(acts_fake).sum(-1))[:1800] # filter the ones with super large values
+    # acts_fake = acts_fake[idxs_]
+    m1, s1 = calculate_activation_statistics(acts_real)
+    m2, s2 = calculate_activation_statistics(acts_fake)
+    fid_value = calculate_frechet_distance(m1, s1, m2, s2)
+    return fid_value
+
+
 if __name__ == '__main__':
     
 

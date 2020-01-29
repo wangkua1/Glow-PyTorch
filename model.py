@@ -1,5 +1,4 @@
 import math
-
 import torch
 import torch.nn as nn
 import ipdb
@@ -66,6 +65,7 @@ class LogitTransform(nn.Module):
     # def __repr__(self):
     #     return ('{name}({alpha})'.format(name=self.__class__.__name__, **self.__dict__))
 
+            
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, sn):
@@ -78,17 +78,15 @@ class FlowStep(nn.Module):
         if flow_permutation == "invconv":
             self.invconv = InvertibleConv1x1(in_channels,
                                              LU_decomposed=LU_decomposed)
-            self.flow_permutation = \
-                lambda z, logdet, rev: self.invconv(z, logdet, rev)
+            # self.flow_permutation = \
+            #     lambda z, logdet, rev: self.invconv(z, logdet, rev)
         elif flow_permutation == "shuffle":
             self.shuffle = Permute2d(in_channels, shuffle=True)
-            self.flow_permutation = \
-                lambda z, logdet, rev: (self.shuffle(z, rev), logdet)
+            # self.flow_permutation = \
+            #     lambda z, logdet, rev: (self.shuffle(z, rev), logdet)
         else:
             self.reverse = Permute2d(in_channels, shuffle=False)
-            self.flow_permutation = \
-                lambda z, logdet, rev: (self.reverse(z, rev), logdet)
-
+                
         # 3. coupling
         if flow_coupling == "additive":
             self.block = get_block(in_channels // 2,
@@ -100,6 +98,8 @@ class FlowStep(nn.Module):
                                    in_channels,
                                    hidden_channels,
                                    sn)
+    def flow_permutation(self, z, logdet, rev):
+        return (self.reverse(z, rev), logdet)
 
     def forward(self, input, logdet=None, reverse=False):
         if not reverse:
@@ -280,22 +280,26 @@ class Glow(nn.Module):
         return split_feature(h, "split")
 
     def forward(self, x=None, y_onehot=None, z=None, temperature=None,
-                reverse=False, use_last_split=False,batch_size=0):
+                reverse=False, use_last_split=False,batch_size=0,return_details=0):
         if reverse:
             assert z is not None or batch_size > 0
             return self.reverse_flow(z, y_onehot, temperature, use_last_split,batch_size)
         else:
-            return self.normal_flow(x, y_onehot)
+            z, bpd, y_logits, (prior, logdet) = self.normal_flow(x, y_onehot)
+            if return_details:
+                return z, bpd, y_logits, (prior, logdet)
+            else:
+                return z, bpd, y_logits
 
     def normal_flow(self, x, y_onehot):
         b, c, h, w = x.shape
 
         x, logdet = uniform_binning_correction(x)
 
-        z, objective = self.flow(x, logdet=logdet, reverse=False)
+        z, logdet = self.flow(x, logdet=logdet, reverse=False)
 
         mean, logs = self.prior(x, y_onehot)
-        objective += gaussian_likelihood(mean, logs, z)
+        prior = gaussian_likelihood(mean, logs, z)
 
         if self.y_condition:
             y_logits = self.project_class(z.mean(2).mean(2))
@@ -303,9 +307,9 @@ class Glow(nn.Module):
             y_logits = None
 
         # Full objective - converted to bits per dimension
-        bpd = (-objective) / (math.log(2.) * c * h * w)
+        bpd = (- (prior+logdet)) / (math.log(2.) * c * h * w)
 
-        return z, bpd, y_logits
+        return z, bpd, y_logits, (prior, logdet)
 
     def reverse_flow(self, z, y_onehot, temperature, use_last_split=False, batch_size=0):
         # with torch.no_grad():
