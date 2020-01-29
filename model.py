@@ -68,10 +68,10 @@ class LogitTransform(nn.Module):
             
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
-                 flow_permutation, flow_coupling, LU_decomposed, sn):
+                 flow_permutation, flow_coupling, LU_decomposed, sn, affine_eps):
         super().__init__()
         self.flow_coupling = flow_coupling
-
+        self.affine_eps = affine_eps
         self.actnorm = ActNorm2d(in_channels, actnorm_scale)
 
         # 2. permute
@@ -123,7 +123,7 @@ class FlowStep(nn.Module):
         elif self.flow_coupling == "affine":
             h = self.block(z1)
             shift, scale = split_feature(h, "cross")
-            scale = torch.sigmoid(scale + 2.)
+            scale = torch.sigmoid(scale)+self.affine_eps
             z2 = z2 + shift
             z2 = z2 * scale
             logdet = torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
@@ -141,7 +141,7 @@ class FlowStep(nn.Module):
         elif self.flow_coupling == "affine":
             h = self.block(z1)
             shift, scale = split_feature(h, "cross")
-            scale = torch.sigmoid(scale + 2.)
+            scale = torch.sigmoid(scale)+self.affine_eps
             z2 = z2 / scale
             z2 = z2 - shift
             logdet = -torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
@@ -159,7 +159,7 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed, logittransform, sn):
+                 LU_decomposed, logittransform, sn,affine_eps):
         super().__init__()
 
         self.layers = nn.ModuleList()
@@ -188,7 +188,8 @@ class FlowNet(nn.Module):
                              flow_permutation=flow_permutation,
                              flow_coupling=flow_coupling,
                              LU_decomposed=LU_decomposed,
-                             sn=sn))
+                             sn=sn,
+                             affine_eps=affine_eps))
                 self.output_shapes.append([-1, C, H, W])
 
             # 3. Split2d
@@ -227,7 +228,7 @@ class FlowNet(nn.Module):
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition,logittransform,sn):
+                 learn_top, y_condition,logittransform,sn,affine_eps):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -238,7 +239,8 @@ class Glow(nn.Module):
                             flow_coupling=flow_coupling,
                             LU_decomposed=LU_decomposed,
                             logittransform=logittransform,
-                            sn=sn)
+                            sn=sn,
+                            affine_eps=affine_eps)
         self.y_classes = y_classes
         self.y_condition = y_condition
 

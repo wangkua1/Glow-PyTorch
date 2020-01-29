@@ -171,7 +171,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps):
 
     device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
 
@@ -192,7 +192,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     test_iter = cycle(test_loader)
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
-                 learn_top, y_condition,logittransform,sn)
+                 learn_top, y_condition,logittransform,sn,affine_eps)
 
     model = model.to(device)
     
@@ -337,10 +337,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 x_real = x_real + .5
                 if (sample!=sample).float().sum() > 0:
                     myprint("Sample NaNs")
-                    raise
-
-                fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
-                myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
+                    fid = 2000
+                else:
+                    fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
+                    myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
                 stats_dict = {
                         'global_iteration': engine.iter_ind ,
                         'fid': fid,
@@ -612,6 +612,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_prior', type=float, default=0)
     parser.add_argument('--weight_logdet', type=float, default=0)
     parser.add_argument('--jac_reg_lambda', type=float, default=0)
+    parser.add_argument('--affine_eps', type=float, default=0)
     parser.add_argument('--disc_lr',
                         type=float, default=1e-5)
 
