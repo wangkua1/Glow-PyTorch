@@ -44,6 +44,7 @@ from utils import uniform_binning_correction
 from recon_mnist import run_recon_evolution
 from inception_score import inception_score, run_fid
 from csv_logger import CSVLogger, plot_csv
+device = 'cpu' if (not torch.cuda.is_available()) else 'cuda:0'
 
 def check_manual_seed(seed):
     seed = seed or random.randint(1, 10000)
@@ -165,16 +166,23 @@ def cycle(loader):
         for data in loader:
             yield data
 
+def generate_from_noise(model, batch_size):
+    _, c2, h, w  = model.prior_h.shape
+    c = c2 // 2
+    zshape = (batch_size, c, h, w)
+    randz  = torch.randn(zshape).to(device)
+    randz  = torch.autograd.Variable(randz, requires_grad=True)
+    images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=0)   
+    return images
 
 def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          epochs, saved_model, seed, hidden_channels, K, L, actnorm_scale,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name):
 
-    device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
-
+    
     check_manual_seed(seed)
 
     ds = check_dataset(dataset, dataroot, augment, download)
@@ -196,19 +204,25 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     model = model.to(device)
     
-    if gan:
+
+    discriminator = mine.Discriminator(image_shape[-1])
+    discriminator = discriminator.to(device)
+    D_optimizer = optim.Adam(filter(lambda p: p.requires_grad, discriminator.parameters()), lr=disc_lr, betas=(.5, .99), weight_decay=0)
+    if optim_name =='adam':
         optimizer = optim.Adam(model.parameters(), lr=lr, betas=(.5, .99), weight_decay=0)
-        discriminator = mine.Discriminator(image_shape[-1])
-        discriminator = discriminator.to(device)
-        D_optimizer = optim.Adam(filter(lambda p: p.requires_grad, discriminator.parameters()), lr=disc_lr, betas=(.5, .99), weight_decay=0)
-    else:
+    elif optim_name=='adamax':
         optimizer = optim.Adamax(model.parameters(), lr=lr, weight_decay=5e-5)
+
+    if not no_warm_up:
+        lr_lambda = lambda epoch: min(1.0, (epoch + 1) / warmup) 
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     iteration_fieldnames = ['global_iteration', 'fid','sample_pad', 'bpd','pad','real_acc','fake_acc','acc']
     iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'iteration_log.csv'))
 
-
+    
+    x_for_recon = test_iter.__next__()[0].to(device)
     def gan_step(engine, batch):
         assert not y_condition
         if 'iter_ind' in dir(engine):
@@ -225,22 +239,27 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         x = x.to(device)
 
         
-        def generate_from_noise(batch_size):
-            _, c2, h, w  = model.prior_h.shape
-            c = c2 // 2
-            zshape = (batch_size, c, h, w)
-            randz  = torch.randn(zshape).to(device)
-            randz  = torch.autograd.Variable(randz, requires_grad=True)
-            images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=batch_size)   
-            return images
+        
 
 
         def run_noised_disc(discriminator, x):
             x = uniform_binning_correction(x)[0]
             return discriminator(x)
         
-        # Train Disc
-        fake = generate_from_noise(x.size(0))
+        # # Train Disc
+        # for  _ in range(20):
+        #     # for module in model.flow.layers:
+        #     #     if "FlowStep"  in str(module.__class__):
+        #     #         module.eval()
+        #     # model.flow.eval()
+        #     # model.eval()
+        #     fake = generate_from_noise(model, x.size(0))
+        #     # for module in model.flow.layers:
+        #     #     if "FlowStep"  in str(module.__class__):
+        #     #         module.train()
+        #     # model.flow.train()
+        #     # model.train()
+        fake = generate_from_noise(model, x.size(0))
 
         D_real_scores = run_noised_disc(discriminator, x.detach())
         D_fake_scores = run_noised_disc(discriminator, fake.detach())
@@ -263,9 +282,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
 
         # Train generator
-        fake = generate_from_noise(x.size(0))
+        fake = generate_from_noise(model, x.size(0))
         G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
-        
+
+        G_loss = 0
         
 
 
@@ -279,7 +299,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 +weight_logdet * -logdet.mean()
         # Jac Reg
         if jac_reg_lambda > 0:
-            x_samples = generate_from_noise(args.batch_size).detach()
+            x_samples = generate_from_noise(model, args.batch_size).detach()
             x_samples.requires_grad_()
             z, _, _, (_, logdet_sample) = model.forward(x_samples, None, return_details=True)
             other_zs = torch.cat([split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits],-1)
@@ -322,22 +342,22 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 # plot recon
                 fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
                 
-                sample_pad = run_recon_evolution(model, generate_from_noise(args.batch_size).detach(), fpath)
+                sample_pad = run_recon_evolution(model, generate_from_noise(model, args.batch_size).detach(), fpath)
                 myprint(f"Iter: {engine.iter_ind}, Recon Sample PAD: {sample_pad}")
 
-                pad = run_recon_evolution(model, x, fpath)
+                pad = run_recon_evolution(model, x_for_recon, fpath)
                 myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
 
                 # Inception score
                 N = 200
-                sample = torch.cat([generate_from_noise(args.batch_size) for _ in range(200//args.batch_size+1)],0 )[:N]
+                sample = torch.cat([generate_from_noise(model, args.batch_size) for _ in range(200//args.batch_size+1)],0 )[:N]
                 sample = sample + .5
                 
                 x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
                 x_real = x_real + .5
                 if (sample!=sample).float().sum() > 0:
                     myprint("Sample NaNs")
-                    fid = 2000
+                    raise
                 else:
                     fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
                     myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
@@ -357,7 +377,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             
                 
         # Dummy
-        losses['total_loss'] = 0
+        losses['total_loss'] = torch.mean(nll).item()
         return losses
 
 
@@ -448,8 +468,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     @trainer.on(Events.EPOCH_COMPLETED)
     def evaluate(engine):
         evaluator.run(test_loader)
-
-        # scheduler.step()
+        if not no_warm_up:
+            scheduler.step()
         metrics = evaluator.state.metrics
 
         losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
@@ -565,7 +585,7 @@ if __name__ == '__main__':
                         help='initial learning rate')
 
     parser.add_argument('--warmup',
-                        type=float, default=1,
+                        type=float, default=5,
                         help='Warmup learning rate linearly per epoch')
 
     parser.add_argument('--warmup_steps',
@@ -613,8 +633,9 @@ if __name__ == '__main__':
     parser.add_argument('--weight_logdet', type=float, default=0)
     parser.add_argument('--jac_reg_lambda', type=float, default=0)
     parser.add_argument('--affine_eps', type=float, default=0)
-    parser.add_argument('--disc_lr',
-                        type=float, default=1e-5)
+    parser.add_argument('--disc_lr',type=float, default=1e-5)
+    parser.add_argument('--no_warm_up',type=int, default=0)
+    parser.add_argument('--optim_name',type=str, default='adam')
 
     args = parser.parse_args()
     kwargs = vars(args)

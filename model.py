@@ -48,14 +48,14 @@ class LogitTransform(nn.Module):
         y = torch.log(s) - torch.log(1 - s)
         if logpx is None:
             return y, None
-        return y, logpx - self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
+        return y, logpx + self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
 
     def _inverse(self, y, logpy=None):
         # ipdb.set_trace()
         x = (torch.sigmoid(y) - self.alpha) / (1 - 2 * self.alpha)
         if logpy is None:
             return x, None
-        return x, logpy + self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
+        return x, logpy - self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
 
     def _logdetgrad(self, x):
         s = self.alpha + (1 - 2 * self.alpha) * x
@@ -78,12 +78,12 @@ class FlowStep(nn.Module):
         if flow_permutation == "invconv":
             self.invconv = InvertibleConv1x1(in_channels,
                                              LU_decomposed=LU_decomposed)
-            # self.flow_permutation = \
-            #     lambda z, logdet, rev: self.invconv(z, logdet, rev)
+            self.flow_permutation = \
+                lambda z, logdet, rev: self.invconv(z, logdet, rev)
         elif flow_permutation == "shuffle":
             self.shuffle = Permute2d(in_channels, shuffle=True)
-            # self.flow_permutation = \
-            #     lambda z, logdet, rev: (self.shuffle(z, rev), logdet)
+            self.flow_permutation = \
+                lambda z, logdet, rev: (self.shuffle(z, rev), logdet)
         else:
             self.reverse = Permute2d(in_channels, shuffle=False)
                 
@@ -315,6 +315,7 @@ class Glow(nn.Module):
 
     def reverse_flow(self, z, y_onehot, temperature, use_last_split=False, batch_size=0):
         # with torch.no_grad():
+        # ipdb.set_trace()
         if z is None:
             mean, logs = self.prior(z, y_onehot, batch_size=batch_size)
             z = gaussian_sample(mean, logs, temperature)
