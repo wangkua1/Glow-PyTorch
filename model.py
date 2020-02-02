@@ -1,5 +1,6 @@
 import math
 import torch
+import numpy as np
 import torch.nn as nn
 import ipdb
 from modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
@@ -7,7 +8,7 @@ from modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
                      Split2d, gaussian_likelihood, gaussian_sample)
 from utils import split_feature, uniform_binning_correction
 from spectral_norm_adaptive import SpectralNormConv2d
-def get_block(in_channels, out_channels, hidden_channels, sn=False):
+def get_block(in_channels, out_channels, hidden_channels, sn=False,no_conv_actnorm=False):
     if sn:
         block =  nn.Sequential(
             SpectralNormConv2d(in_channels, hidden_channels, 3, stride=1, padding=1,coeff=1),
@@ -17,10 +18,10 @@ def get_block(in_channels, out_channels, hidden_channels, sn=False):
             SpectralNormConv2d(hidden_channels, out_channels, 3, stride=1, padding=1,coeff=1)
             )
     else:
-        block = nn.Sequential(Conv2d(in_channels, hidden_channels),
+        block = nn.Sequential(Conv2d(in_channels, hidden_channels,do_actnorm=not no_conv_actnorm),
                           nn.ReLU(inplace=False),
                           Conv2d(hidden_channels, hidden_channels,
-                                 kernel_size=(1, 1)),
+                                 kernel_size=(1, 1),do_actnorm=not no_conv_actnorm),
                           nn.ReLU(inplace=False),
                           Conv2dZeros(hidden_channels, out_channels))
     return block
@@ -51,7 +52,6 @@ class LogitTransform(nn.Module):
         return y, logpx + self._logdetgrad(x).view(x.size(0), -1).sum(1, keepdim=True)
 
     def _inverse(self, y, logpy=None):
-        # ipdb.set_trace()
         x = (torch.sigmoid(y) - self.alpha) / (1 - 2 * self.alpha)
         if logpy is None:
             return x, None
@@ -68,11 +68,16 @@ class LogitTransform(nn.Module):
             
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
-                 flow_permutation, flow_coupling, LU_decomposed, sn, affine_eps):
+                 flow_permutation, flow_coupling, LU_decomposed, sn, affine_eps,no_actnorm,affine_scale_eps=0,actnorm_max_scale=None,no_conv_actnorm=False, affine_max_scale=0):
         super().__init__()
         self.flow_coupling = flow_coupling
         self.affine_eps = affine_eps
-        self.actnorm = ActNorm2d(in_channels, actnorm_scale)
+        self.max_scale = affine_max_scale
+        assert not (flow_coupling=='gaffine' and affine_max_scale==0)
+        self.no_actnorm = no_actnorm
+        self.affine_scale_eps = affine_scale_eps
+        if not self.no_actnorm:
+            self.actnorm = ActNorm2d(in_channels, actnorm_scale, max_scale=actnorm_max_scale)
 
         # 2. permute
         if flow_permutation == "invconv":
@@ -92,12 +97,14 @@ class FlowStep(nn.Module):
             self.block = get_block(in_channels // 2,
                                    in_channels // 2,
                                    hidden_channels,
-                                   sn)
-        elif flow_coupling == "affine":
+                                   sn,
+                                   no_conv_actnorm)
+        elif flow_coupling in ["affine", "naffine", "gaffine"]:
             self.block = get_block(in_channels // 2,
                                    in_channels,
                                    hidden_channels,
-                                   sn)
+                                   sn,
+                                   no_conv_actnorm)
     def flow_permutation(self, z, logdet, rev):
         return (self.reverse(z, rev), logdet)
 
@@ -111,7 +118,10 @@ class FlowStep(nn.Module):
         assert input.size(1) % 2 == 0
 
         # 1. actnorm
-        z, logdet = self.actnorm(input, logdet=logdet, reverse=False)
+        if not self.no_actnorm:
+            z, logdet = self.actnorm(input, logdet=logdet, reverse=False)
+        else:
+            z = input
 
         # 2. permute
         z, logdet = self.flow_permutation(z, logdet, False)
@@ -123,7 +133,23 @@ class FlowStep(nn.Module):
         elif self.flow_coupling == "affine":
             h = self.block(z1)
             shift, scale = split_feature(h, "cross")
-            scale = torch.sigmoid(scale)+self.affine_eps
+            scale = torch.sigmoid(scale+self.affine_scale_eps)+self.affine_eps
+            z2 = z2 + shift
+            z2 = z2 * scale
+            logdet = torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
+        elif self.flow_coupling == "gaffine":
+            h = self.block(z1)
+            shift, scale = split_feature(h, "cross")
+            scale = torch.exp(np.log(self.max_scale) * torch.tanh(scale))
+            self.last_scale = scale
+            z2 = z2 + shift
+            z2 = z2 * scale
+            logdet = torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
+        elif self.flow_coupling == "naffine":
+            h = self.block(z1)
+            shift, scale = split_feature(h, "cross")
+            eps = self.affine_eps
+            scale = (2*torch.sigmoid(scale) - 1) * (1 - eps) + 1
             z2 = z2 + shift
             z2 = z2 * scale
             logdet = torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
@@ -141,7 +167,22 @@ class FlowStep(nn.Module):
         elif self.flow_coupling == "affine":
             h = self.block(z1)
             shift, scale = split_feature(h, "cross")
-            scale = torch.sigmoid(scale)+self.affine_eps
+            scale = torch.sigmoid(scale+self.affine_scale_eps)+self.affine_eps
+            z2 = z2 / scale
+            z2 = z2 - shift
+            logdet = -torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
+        elif self.flow_coupling == "gaffine":
+            h = self.block(z1)
+            shift, scale = split_feature(h, "cross")
+            scale = torch.exp(np.log(self.max_scale) * torch.tanh(scale))
+            z2 = z2 / scale
+            z2 = z2 - shift
+            logdet = torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
+        elif self.flow_coupling == "naffine":
+            h = self.block(z1)
+            shift, scale = split_feature(h, "cross")
+            eps = self.affine_eps
+            scale = (2*torch.sigmoid(scale) - 1) * (1 - eps) + 1
             z2 = z2 / scale
             z2 = z2 - shift
             logdet = -torch.sum(torch.log(scale), dim=[1, 2, 3]) + logdet
@@ -151,7 +192,8 @@ class FlowStep(nn.Module):
         z, logdet = self.flow_permutation(z, logdet, True)
 
         # 3. actnorm
-        z, logdet = self.actnorm(z, logdet=logdet, reverse=True)
+        if not self.no_actnorm:
+            z, logdet = self.actnorm(z, logdet=logdet, reverse=True)
 
         return z, logdet
 
@@ -159,7 +201,7 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed, logittransform, sn,affine_eps):
+                 LU_decomposed, logittransform, sn,affine_eps, no_actnorm,affine_scale_eps,actnorm_max_scale,no_conv_actnorm,affine_max_scale):
         super().__init__()
 
         self.layers = nn.ModuleList()
@@ -189,7 +231,12 @@ class FlowNet(nn.Module):
                              flow_coupling=flow_coupling,
                              LU_decomposed=LU_decomposed,
                              sn=sn,
-                             affine_eps=affine_eps))
+                             affine_eps=affine_eps,
+                             no_actnorm=no_actnorm,
+                             affine_scale_eps=affine_scale_eps,
+                             actnorm_max_scale=actnorm_max_scale,
+                             no_conv_actnorm=no_conv_actnorm,
+                             affine_max_scale=affine_max_scale))
                 self.output_shapes.append([-1, C, H, W])
 
             # 3. Split2d
@@ -228,7 +275,7 @@ class FlowNet(nn.Module):
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition,logittransform,sn,affine_eps):
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -240,7 +287,12 @@ class Glow(nn.Module):
                             LU_decomposed=LU_decomposed,
                             logittransform=logittransform,
                             sn=sn,
-                            affine_eps=affine_eps)
+                            affine_eps=affine_eps,
+                            no_actnorm=no_actnorm,
+                            affine_scale_eps=affine_scale_eps,
+                            actnorm_max_scale=actnorm_max_scale,
+                            no_conv_actnorm=no_conv_actnorm,
+                            affine_max_scale=affine_max_scale)
         self.y_classes = y_classes
         self.y_condition = y_condition
 
@@ -299,10 +351,11 @@ class Glow(nn.Module):
         x, logdet = uniform_binning_correction(x)
 
         z, logdet = self.flow(x, logdet=logdet, reverse=False)
-
+        # print(logdet.max().item(), logdet.min().item())
         mean, logs = self.prior(x, y_onehot)
         prior = gaussian_likelihood(mean, logs, z)
-
+        # print(prior.max().item(), prior.min().item())
+        
         if self.y_condition:
             y_logits = self.project_class(z.mean(2).mean(2))
         else:

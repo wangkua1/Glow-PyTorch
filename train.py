@@ -23,6 +23,7 @@ import json
 import shutil
 import random
 from itertools import islice
+import sys
 
 import torch
 import torch.nn.functional as F
@@ -44,6 +45,8 @@ from utils import uniform_binning_correction
 from recon_mnist import run_recon_evolution
 from inception_score import inception_score, run_fid
 from csv_logger import CSVLogger, plot_csv
+import plot_utils
+import utils
 device = 'cpu' if (not torch.cuda.is_available()) else 'cuda:0'
 
 def check_manual_seed(seed):
@@ -166,13 +169,17 @@ def cycle(loader):
         for data in loader:
             yield data
 
-def generate_from_noise(model, batch_size):
+def generate_from_noise(model, batch_size,clamp=False, guard_nans=True):
     _, c2, h, w  = model.prior_h.shape
     c = c2 // 2
     zshape = (batch_size, c, h, w)
     randz  = torch.randn(zshape).to(device)
     randz  = torch.autograd.Variable(randz, requires_grad=True)
-    images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=0)   
+    if clamp:
+        randz = torch.clamp(randz,-5,5)
+    images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=0) 
+    if guard_nans:
+        images[(images!=images)] = 0
     return images
 
 def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
@@ -180,7 +187,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale):
 
     
     check_manual_seed(seed)
@@ -200,7 +207,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     test_iter = cycle(test_loader)
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
-                 learn_top, y_condition,logittransform,sn,affine_eps)
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps, actnorm_max_scale, no_conv_actnorm,affine_max_scale)
 
     model = model.to(device)
     
@@ -220,6 +227,15 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     iteration_fieldnames = ['global_iteration', 'fid','sample_pad', 'bpd','pad','real_acc','fake_acc','acc']
     iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'iteration_log.csv'))
+    iteration_fieldnames = ['global_iteration' 
+                            ,'condition_num'
+                            ,'max_sv'
+                            ,'min_sv'
+                            ,'inverse_condition_num'
+                            ,'inverse_max_sv'
+                            ,'inverse_min_sv']
+    svd_logger = CSVLogger(fieldnames=iteration_fieldnames,
+                             filename=os.path.join(output_dir, 'svd_log.csv'))
 
     
     x_for_recon = test_iter.__next__()[0].to(device)
@@ -232,8 +248,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         losses = {}
         model.train()
         discriminator.train()
-        optimizer.zero_grad()
-
+        
 
         x, y = batch
         x = x.to(device)
@@ -259,7 +274,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         #     #         module.train()
         #     # model.flow.train()
         #     # model.train()
-        fake = generate_from_noise(model, x.size(0))
+        fake = generate_from_noise(model, x.size(0), clamp=clamp)
 
         D_real_scores = run_noised_disc(discriminator, x.detach())
         D_fake_scores = run_noised_disc(discriminator, fake.detach())
@@ -281,14 +296,12 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         D_optimizer.step()
 
 
-        # Train generator
-        fake = generate_from_noise(model, x.size(0))
-        G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
+        # # Train generator
+        # fake = generate_from_noise(model, x.size, clamp=clamp(0))
+        # G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
+
 
         G_loss = 0
-        
-
-
         z, nll, y_logits, (prior, logdet)= model.forward(x, None, return_details=True)
         nll = nll.mean()
         
@@ -299,9 +312,9 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 +weight_logdet * -logdet.mean()
         # Jac Reg
         if jac_reg_lambda > 0:
-            x_samples = generate_from_noise(model, args.batch_size).detach()
+            x_samples = generate_from_noise(model, args.batch_size, clamp=clamp).detach()
             x_samples.requires_grad_()
-            z, _, _, (_, logdet_sample) = model.forward(x_samples, None, return_details=True)
+            z = model.forward(x_samples, None, return_details=True)[0]
             other_zs = torch.cat([split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits],-1)
             all_z = torch.cat([other_zs, z.view(x.size(0),-1)], -1)
             foward_jac = compute_jacobian_regularizer(x_samples, all_z, n_proj=1)
@@ -318,39 +331,72 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
             loss = loss + jac_reg_lambda * (foward_jac + inverse_jac)
 
-        loss.backward()
+        if not eval_only:
+            optimizer.zero_grad()
+            loss.backward()
 
-        if max_grad_clip > 0:
-            torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            if max_grad_clip > 0:
+                torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
-        optimizer.step()
+            optimizer.step()
 
+
+        # scales = []
+        # for module in model.flow.layers:
+        #     if "FlowStep"  in str(module.__class__):
+        #         scales.append(module.last_scale.view(-1))
+        # scales = torch.cat(scales)
+        # print("Scales...")
+        # print(torch.max(scales).item(), torch.min(scales).item())
+
+        # scales = []
+        # for module in model.flow.layers:
+        #     if "FlowStep"  in str(module.__class__):
+        #         scales.append(module.actnorm.last_scale.view(-1))
+        # scales = torch.cat(scales)
+        # print("AN Scales...")
+        # print(torch.max(scales).item(), torch.min(scales).item())
 
         if engine.iter_ind  % 100==0:
+            fake = generate_from_noise(model, x.size(0), clamp=clamp)
+            z = model.forward(fake, None, return_details=True)[0]
+            print("Z max min")
+            print(z.max().item(), z.min().item())
+            if (fake!=fake).float().sum() > 0:
+                title='NaNs'
+            else:
+                title="Good"
             grid = make_grid((postprocess(fake.detach().cpu())[:30]), nrow=6).permute(1,2,0)
             plt.figure(figsize=(10,10))
             plt.imshow(grid)
             plt.axis('off')
+            plt.title(title)
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
         if engine.iter_ind  % eval_every==0:
             torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
 
+            model.eval()
+
             with torch.no_grad():
                 # plot recon
                 fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
                 
-                sample_pad = run_recon_evolution(model, generate_from_noise(model, args.batch_size).detach(), fpath)
+                sample_pad = run_recon_evolution(model, generate_from_noise(model, args.batch_size, clamp=clamp).detach(), fpath)
                 myprint(f"Iter: {engine.iter_ind}, Recon Sample PAD: {sample_pad}")
 
                 pad = run_recon_evolution(model, x_for_recon, fpath)
                 myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
+                pad =  pad.item()
+                sample_pad  =  sample_pad.item()
+
+                # pad = sample_pad  =  0
 
                 # Inception score
                 N = 200
-                sample = torch.cat([generate_from_noise(model, args.batch_size) for _ in range(200//args.batch_size+1)],0 )[:N]
+                sample = torch.cat([generate_from_noise(model, args.batch_size, clamp=clamp) for _ in range(200//args.batch_size+1)],0 )[:N]
                 sample = sample + .5
                 
                 x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
@@ -365,16 +411,39 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                         'global_iteration': engine.iter_ind ,
                         'fid': fid,
                         'bpd': torch.mean(nll).item(),
-                        'pad': pad.item(),
-                        'sample_pad': sample_pad.item(),
-                        'real_acc': D_real_accuracy.item(),
-                        'fake_acc': D_fake_accuracy.item(),
-                        'acc': .5*(D_fake_accuracy.item()+D_real_accuracy.item())
+                        'pad': pad,
+                        'sample_pad': sample_pad,
+                        'real_acc':0,
+                        'fake_acc': 0,
+                        'acc': 0
+                
+                        # 'real_acc': D_real_accuracy.item(),
+                        # 'fake_acc': D_fake_accuracy.item(),
+                        # 'acc': .5*(D_fake_accuracy.item()+D_real_accuracy.item())
                 }
                 iteration_logger.writerow(stats_dict)
                 plot_csv(iteration_logger.filename)
+            model.train()
             
-            
+        if  engine.iter_ind + 2 % svd_every == 0:
+            model.eval()
+            svd_dict = {}
+            D_for, D_inv = utils.computeSVDjacobian(x_for_recon, model, inverse=False)
+            cn = float(D_for.max()/ D_for.min())
+            cn_inv = float(D_inv.max()/ D_inv.min())
+            svd_dict['global_iteration'] =  engine.iter_ind  
+            svd_dict['condition_num'] = cn
+            svd_dict['max_sv'] = float(D_for.max())  
+            svd_dict['min_sv'] = float(D_for.min())
+            svd_dict['inverse_condition_num'] = cn_inv
+            svd_dict['inverse_max_sv'] = float(D_inv.max())  
+            svd_dict['inverse_min_sv'] = float(D_inv.min())
+            svd_logger.writerow(svd_dict)
+            # plot_utils.plot_stability_stats(output_dir)
+            # plot_utils.plot_individual_figures(output_dir, 'svd_log.csv')
+            model.train()
+            if eval_only:
+                sys.exit()
                 
         # Dummy
         losses['total_loss'] = torch.mean(nll).item()
@@ -427,24 +496,36 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     # load pre-trained model if given
     if saved_model:
-        model.load_state_dict(torch.load(saved_model))
-        model.set_actnorm_init()
+        print("Loading...")
+        print(saved_model)
+        loaded =  torch.load(saved_model)
+        if 'Glow' in str(type(loaded)):
+            model  = loaded
+        else:
+            raise
+        # if 'Glow' in str(type(loaded)):
+        #     loaded  = loaded.state_dict()
+        # model.load_state_dict(loaded)
+        # model.set_actnorm_init()
 
-        if saved_optimizer:
-            optimizer.load_state_dict(torch.load(saved_optimizer))
+        # if saved_optimizer:
+        #     optimizer.load_state_dict(torch.load(saved_optimizer))
 
-        file_name, ext = os.path.splitext(saved_model)
-        resume_epoch = int(file_name.split('_')[-1])
+        # file_name, ext = os.path.splitext(saved_model)
+        # resume_epoch = int(file_name.split('_')[-1])
 
-        @trainer.on(Events.STARTED)
-        def resume_training(engine):
-            engine.state.epoch = resume_epoch
-            engine.state.iteration = resume_epoch * len(engine.state.dataloader)
+        # @trainer.on(Events.STARTED)
+        # def resume_training(engine):
+        #     engine.state.epoch = resume_epoch
+        #     engine.state.iteration = resume_epoch * len(engine.state.dataloader)
+
 
     @trainer.on(Events.STARTED)
     def init(engine):
+        if saved_model:
+            return
         model.train()
-
+        print("Initializing Actnorm...")
         init_batches = []
         init_targets = []
 
@@ -539,7 +620,7 @@ if __name__ == '__main__':
                         help='Type of flow permutation')
 
     parser.add_argument('--flow_coupling', type=str,
-                        default='affine', choices=['additive', 'affine'],
+                        default='affine', choices=['additive', 'affine','naffine','gaffine'],
                         help='Type of flow coupling')
 
     parser.add_argument('--no_LU_decomposed', action='store_false',
@@ -636,6 +717,14 @@ if __name__ == '__main__':
     parser.add_argument('--disc_lr',type=float, default=1e-5)
     parser.add_argument('--no_warm_up',type=int, default=0)
     parser.add_argument('--optim_name',type=str, default='adam')
+    parser.add_argument('--clamp',type=int, default=0)
+    parser.add_argument('--svd_every',type=int, default=1)
+    parser.add_argument('--eval_only',type=int, default=0)
+    parser.add_argument('--no_actnorm',type=int, default=0)
+    parser.add_argument('--affine_scale_eps',type=float, default=0)
+    parser.add_argument('--actnorm_max_scale',type=float, default=0)
+    parser.add_argument('--no_conv_actnorm',type=int, default=0)
+    parser.add_argument('--affine_max_scale',type=float, default=0)
 
     args = parser.parse_args()
     kwargs = vars(args)
