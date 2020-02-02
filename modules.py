@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import numpy as np
 from utils import split_feature, pixels, compute_same_pad
 import ipdb
 
@@ -24,7 +24,9 @@ def gaussian_likelihood(mean, logs, x):
 
 def gaussian_sample(mean, logs, temperature=1):
     # Sample from Gaussian with temperature
-    z = mean + torch.randn_like( mean) * torch.exp(logs) * temperature
+    noise =  torch.randn_like( mean)
+    # noise = torch.clamp(noise, -5, 5)
+    z = mean +  noise * torch.exp(logs) * temperature
     # z = torch.normal(mean, torch.exp(logs) * temperature)
 
     return z
@@ -130,7 +132,7 @@ class _ActNorm(nn.Module):
     After initialization, `bias` and `logs` will be trained as parameters.
     """
 
-    def __init__(self, num_features, scale=1.):
+    def __init__(self, num_features, scale=1.,max_scale=0):
         super().__init__()
         # register mean and scale
         size = [1, num_features, 1, 1]
@@ -139,6 +141,8 @@ class _ActNorm(nn.Module):
         self.num_features = num_features
         self.scale = scale
         self.inited = False
+        self.stable_eps = 0
+        self.max_scale =max_scale
 
     def initialize_parameters(self, input):
         if not self.training:
@@ -162,11 +166,17 @@ class _ActNorm(nn.Module):
             return input + self.bias
 
     def _scale(self, input, logdet=None, reverse=False):
-
-        if reverse:
-            input = input * torch.exp(-self.logs)
+        if self.max_scale == 0:
+            scale = (torch.exp(self.logs)+self.stable_eps)
+            # eps = self.stable_eps
+            # scale = (2*torch.sigmoid(self.logs) - 1) * (1 - eps) + 1
         else:
-            input = input * torch.exp(self.logs)
+            scale = torch.exp(np.log(self.max_scale) * torch.tanh(self.logs))
+        self.last_scale = scale
+        if reverse:
+            input = input / scale
+        else:
+            input = input * scale
 
         if logdet is not None:
             """
@@ -174,8 +184,7 @@ class _ActNorm(nn.Module):
             so we need to multiply by number of pixels
             """
             b, c, h, w = input.shape
-
-            dlogdet = torch.sum(self.logs) * h * w
+            dlogdet = torch.sum(torch.log(scale)) * h * w
 
             if reverse:
                 dlogdet *= -1
@@ -201,8 +210,8 @@ class _ActNorm(nn.Module):
 
 
 class ActNorm2d(_ActNorm):
-    def __init__(self, num_features, scale=1.):
-        super().__init__(num_features, scale)
+    def __init__(self, num_features, scale=1., max_scale=0):
+        super().__init__(num_features, scale, max_scale)
 
     def _check_input_dim(self, input):
         assert len(input.size()) == 4
@@ -332,6 +341,7 @@ class Split2d(nn.Module):
             z1 = input
             mean, logs = self.split2d_prior(z1)
             if self.use_last:
+                self._last_z2.requires_grad_()
                 z2 = self._last_z2
                 self.use_last = False
             else:
