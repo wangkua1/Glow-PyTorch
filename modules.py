@@ -132,7 +132,7 @@ class _ActNorm(nn.Module):
     After initialization, `bias` and `logs` will be trained as parameters.
     """
 
-    def __init__(self, num_features, scale=1.,max_scale=0):
+    def __init__(self, num_features, scale=1.,max_scale=0,actnorm_eps=0):
         super().__init__()
         # register mean and scale
         size = [1, num_features, 1, 1]
@@ -141,7 +141,7 @@ class _ActNorm(nn.Module):
         self.num_features = num_features
         self.scale = scale
         self.inited = False
-        self.stable_eps = 0
+        self.stable_eps = actnorm_eps
         self.max_scale =max_scale
 
     def initialize_parameters(self, input):
@@ -210,8 +210,8 @@ class _ActNorm(nn.Module):
 
 
 class ActNorm2d(_ActNorm):
-    def __init__(self, num_features, scale=1., max_scale=0):
-        super().__init__(num_features, scale, max_scale)
+    def __init__(self, num_features, scale=1., max_scale=0,actnorm_eps=0):
+        super().__init__(num_features, scale, max_scale,actnorm_eps)
 
     def _check_input_dim(self, input):
         assert len(input.size()) == 4

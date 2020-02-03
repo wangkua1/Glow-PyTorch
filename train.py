@@ -187,7 +187,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps):
 
     
     check_manual_seed(seed)
@@ -207,7 +207,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     test_iter = cycle(test_loader)
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
-                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps, actnorm_max_scale, no_conv_actnorm,affine_max_scale)
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps, actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps)
 
     model = model.to(device)
     
@@ -337,6 +337,13 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+            # Replace NaN gradient with 0
+            for p in model.parameters(): 
+                if p.requires_grad:
+                    g = p.grad.data
+                    g[g!=g] = 0
+
 
             optimizer.step()
 
@@ -723,6 +730,7 @@ if __name__ == '__main__':
     parser.add_argument('--actnorm_max_scale',type=float, default=0)
     parser.add_argument('--no_conv_actnorm',type=int, default=0)
     parser.add_argument('--affine_max_scale',type=float, default=0)
+    parser.add_argument('--actnorm_eps',type=float, default=0)
 
     args = parser.parse_args()
     kwargs = vars(args)

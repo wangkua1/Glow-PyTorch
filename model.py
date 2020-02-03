@@ -45,6 +45,7 @@ class LogitTransform(nn.Module):
             return output-.5, logdet
 
     def _forward(self, x, logpx=None):
+        x.clamp_(0,1)
         s = self.alpha + (1 - 2 * self.alpha) * x
         y = torch.log(s) - torch.log(1 - s)
         if logpx is None:
@@ -68,7 +69,7 @@ class LogitTransform(nn.Module):
             
 class FlowStep(nn.Module):
     def __init__(self, in_channels, hidden_channels, actnorm_scale,
-                 flow_permutation, flow_coupling, LU_decomposed, sn, affine_eps,no_actnorm,affine_scale_eps=0,actnorm_max_scale=None,no_conv_actnorm=False, affine_max_scale=0):
+                 flow_permutation, flow_coupling, LU_decomposed, sn, affine_eps,no_actnorm,affine_scale_eps=0,actnorm_max_scale=None,no_conv_actnorm=False, affine_max_scale=0,actnorm_eps=0):
         super().__init__()
         self.flow_coupling = flow_coupling
         self.affine_eps = affine_eps
@@ -77,7 +78,7 @@ class FlowStep(nn.Module):
         self.no_actnorm = no_actnorm
         self.affine_scale_eps = affine_scale_eps
         if not self.no_actnorm:
-            self.actnorm = ActNorm2d(in_channels, actnorm_scale, max_scale=actnorm_max_scale)
+            self.actnorm = ActNorm2d(in_channels, actnorm_scale, max_scale=actnorm_max_scale,actnorm_eps=actnorm_eps)
 
         # 2. permute
         if flow_permutation == "invconv":
@@ -116,7 +117,6 @@ class FlowStep(nn.Module):
 
     def normal_flow(self, input, logdet):
         assert input.size(1) % 2 == 0
-
         # 1. actnorm
         if not self.no_actnorm:
             z, logdet = self.actnorm(input, logdet=logdet, reverse=False)
@@ -201,7 +201,7 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed, logittransform, sn,affine_eps, no_actnorm,affine_scale_eps,actnorm_max_scale,no_conv_actnorm,affine_max_scale):
+                 LU_decomposed, logittransform, sn,affine_eps, no_actnorm,affine_scale_eps,actnorm_max_scale,no_conv_actnorm,affine_max_scale,actnorm_eps):
         super().__init__()
 
         self.layers = nn.ModuleList()
@@ -236,7 +236,7 @@ class FlowNet(nn.Module):
                              affine_scale_eps=affine_scale_eps,
                              actnorm_max_scale=actnorm_max_scale,
                              no_conv_actnorm=no_conv_actnorm,
-                             affine_max_scale=affine_max_scale))
+                             affine_max_scale=affine_max_scale,actnorm_eps=actnorm_eps))
                 self.output_shapes.append([-1, C, H, W])
 
             # 3. Split2d
@@ -275,7 +275,7 @@ class FlowNet(nn.Module):
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale):
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -292,7 +292,8 @@ class Glow(nn.Module):
                             affine_scale_eps=affine_scale_eps,
                             actnorm_max_scale=actnorm_max_scale,
                             no_conv_actnorm=no_conv_actnorm,
-                            affine_max_scale=affine_max_scale)
+                            affine_max_scale=affine_max_scale,
+                            actnorm_eps=actnorm_eps)
         self.y_classes = y_classes
         self.y_condition = y_condition
 
@@ -367,8 +368,6 @@ class Glow(nn.Module):
         return z, bpd, y_logits, (prior, logdet)
 
     def reverse_flow(self, z, y_onehot, temperature, use_last_split=False, batch_size=0):
-        # with torch.no_grad():
-        # ipdb.set_trace()
         if z is None:
             mean, logs = self.prior(z, y_onehot, batch_size=batch_size)
             z = gaussian_sample(mean, logs, temperature)
