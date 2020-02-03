@@ -296,12 +296,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         D_optimizer.step()
 
 
-        # # Train generator
-        # fake = generate_from_noise(model, x.size, clamp=clamp(0))
-        # G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
+        # Train generator
+        fake = generate_from_noise(model, x.size(0), clamp=clamp, guard_nans=False)
+        G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
 
-
-        G_loss = 0
         z, nll, y_logits, (prior, logdet)= model.forward(x, None, return_details=True)
         nll = nll.mean()
         
