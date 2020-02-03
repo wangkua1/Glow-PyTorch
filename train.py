@@ -310,13 +310,13 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 +weight_logdet * -logdet.mean()
         # Jac Reg
         if jac_reg_lambda > 0:
+            # Sample
             x_samples = generate_from_noise(model, args.batch_size, clamp=clamp).detach()
             x_samples.requires_grad_()
             z = model.forward(x_samples, None, return_details=True)[0]
             other_zs = torch.cat([split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits],-1)
             all_z = torch.cat([other_zs, z.view(x.size(0),-1)], -1)
-            foward_jac = compute_jacobian_regularizer(x_samples, all_z, n_proj=1)
-            foward_jac= 0
+            sample_foward_jac = compute_jacobian_regularizer(x_samples, all_z, n_proj=1)
             _, c2, h, w  = model.prior_h.shape
             c = c2 // 2
             zshape = (batch_size, c, h, w)
@@ -325,9 +325,25 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             images = model(z= randz, y_onehot=None, temperature=1, reverse=True,batch_size=0) 
             other_zs = [split._last_z2 for  split  in model.flow.splits]
             all_z = [randz] + other_zs
-            inverse_jac = compute_jacobian_regularizer_manyinputs(all_z, images, n_proj=1)
+            sample_inverse_jac = compute_jacobian_regularizer_manyinputs(all_z, images, n_proj=1)
 
-            loss = loss + jac_reg_lambda * (foward_jac + inverse_jac)
+            # Data
+            x.requires_grad_()
+            z = model.forward(x, None, return_details=True)[0]
+            other_zs = torch.cat([split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits],-1)
+            all_z = torch.cat([other_zs, z.view(x.size(0),-1)], -1)
+            data_foward_jac = compute_jacobian_regularizer(x, all_z, n_proj=1)
+            _, c2, h, w  = model.prior_h.shape
+            c = c2 // 2
+            zshape = (batch_size, c, h, w)
+            z.requires_grad_()
+            images = model(z=z, y_onehot=None, temperature=1, reverse=True,batch_size=0)
+            other_zs = [split._last_z2 for  split  in model.flow.splits]
+            all_z = [z] + other_zs
+            data_inverse_jac = compute_jacobian_regularizer_manyinputs(all_z, images, n_proj=1)
+
+            loss = loss + jac_reg_lambda * (sample_foward_jac + sample_inverse_jac 
+                                        +data_foward_jac  + data_inverse_jac)
 
         if not eval_only:
             optimizer.zero_grad()
