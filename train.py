@@ -187,7 +187,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,init_sample):
 
     
     check_manual_seed(seed)
@@ -304,10 +304,16 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         nll = nll.mean()
         
 
-
-        loss =   weight_gan * G_loss \
-                +weight_prior * -prior.mean() \
-                +weight_logdet * -logdet.mean()
+        loss = 0
+        if weight_gan > 0:
+            loss = loss +  weight_gan * G_loss
+        if weight_prior > 0:
+            loss = loss +  weight_prior * -prior.mean()
+        if weight_logdet > 0:
+            loss = loss + weight_logdet * -logdet.mean()
+        # loss =   weight_gan * G_loss \
+        #         +weight_prior * -prior.mean() \
+        #         +weight_logdet * -logdet.mean()
         # Jac Reg
         if jac_reg_lambda > 0:
             # Sample
@@ -342,8 +348,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             all_z = [z] + other_zs
             data_inverse_jac = compute_jacobian_regularizer_manyinputs(all_z, images, n_proj=1)
 
-            loss = loss + jac_reg_lambda * (sample_foward_jac + sample_inverse_jac 
-                                        +data_foward_jac  + data_inverse_jac)
+            # loss = loss + jac_reg_lambda * (sample_foward_jac + sample_inverse_jac )
+            loss = loss + jac_reg_lambda * (sample_foward_jac + sample_inverse_jac  +data_foward_jac  + data_inverse_jac)
 
         if not eval_only:
             optimizer.zero_grad()
@@ -550,22 +556,28 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         init_batches = []
         init_targets = []
 
+        if n_init_batches == 0:
+            model.set_actnorm_init()
+            return  
         with torch.no_grad():
-            for batch, target in islice(train_loader, None,
-                                        n_init_batches):
-                init_batches.append(batch)
-                init_targets.append(target)
-
-            init_batches = torch.cat(init_batches).to(device)
-
-            assert init_batches.shape[0] == n_init_batches * batch_size
-
-            if y_condition:
-                init_targets = torch.cat(init_targets).to(device)
+            if init_sample:
+                generate_from_noise(model, args.batch_size * args.n_init_batches)
             else:
-                init_targets = None
+                for batch, target in islice(train_loader, None,
+                                            n_init_batches):
+                    init_batches.append(batch)
+                    init_targets.append(target)
 
-            model(init_batches, init_targets)
+                init_batches = torch.cat(init_batches).to(device)
+
+                assert init_batches.shape[0] == n_init_batches * batch_size
+
+                if y_condition:
+                    init_targets = torch.cat(init_targets).to(device)
+                else:
+                    init_targets = None
+
+                model(init_batches, init_targets)
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def evaluate(engine):
@@ -747,6 +759,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_conv_actnorm',type=int, default=0)
     parser.add_argument('--affine_max_scale',type=float, default=0)
     parser.add_argument('--actnorm_eps',type=float, default=0)
+    parser.add_argument('--init_sample',type=int, default=0)
 
     args = parser.parse_args()
     kwargs = vars(args)
