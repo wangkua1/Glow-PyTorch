@@ -1,4 +1,4 @@
-DR=/scratch/ssd001/home/wangkuan/data
+DR=data
 AMS=5
 MLE=0
 LR=5e-5
