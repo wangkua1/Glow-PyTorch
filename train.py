@@ -1,22 +1,4 @@
-"""
-python train.py  \
-    --fresh  \
-    --gan  \
-    --dataset mnist  \
-    --L 3  \
-    --K 4 \
-    --hidden_channels 128  \
-    --batch_size 32 \
-    --lr 1e-5  \
-    --disc_lr 1e-4 \
-    --flow_permutation reverse   \
-    --flow_coupling additive  \
-    --no_learn_top \
-    --sn 0 \
-    --output_dir /scratch/gobi2/wangkuan/glow/rebuttal-guess/db
 
-
-"""
 import argparse
 import os
 import json
@@ -607,16 +589,7 @@ def makedirs(dirname):
         os.makedirs(dirname)
 
 if __name__ == '__main__':
-    """ 
-    python train.py \
-    --output_dir /scratch/gobi2/wangkuan/glow/cifar10
 
-    python train.py --no_learn_top --dataset mnist --L 2 \
-    --hidden_channels 128 --lr 1e-3 \
-    --flow_permutation reverse \
-    --flow_coupling additive \
-    --output_dir /scratch/gobi2/wangkuan/glow/db --fresh
-    """
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--dataset', type=str,
@@ -624,7 +597,7 @@ if __name__ == '__main__':
                         help='Type of the dataset to be used.')
 
     parser.add_argument('--dataroot',
-                        type=str, default='/scratch/gobi2/wangkuan/data',
+                        type=str, default='',
                         help='path to dataset')
 
     parser.add_argument('--download', default=True)
@@ -716,7 +689,7 @@ if __name__ == '__main__':
                         help='disables cuda')
 
     parser.add_argument('--output_dir',
-                        default='/scratch/gobi2/wangkuan/glow/',
+                        default='',
                         help='directory to output logs and model checkpoints')
 
     parser.add_argument('--fresh',

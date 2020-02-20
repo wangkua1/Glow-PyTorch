@@ -1,8 +1,4 @@
-"""
-python recon_mnist.py \
---output_folder='/scratch/gobi2/wangkuan/glow/gans1-1/simple-128-32-1e-5-1e-4' \
---model_name='glow_model_47.pth'
-"""
+
 
 import json
 
@@ -129,20 +125,6 @@ def main(args,kwargs):
     fpath = os.path.join(output_folder, '_recon_evoluation.png')
     pad = run_recon_evolution(model, x, fpath)
 
-if __name__ == '__main__':
 
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--output_folder', type=str,
-                        default= '/scratch/gobi2/wangkuan/glow/mnist-1x1-affine-512-1e-2')
-
-    parser.add_argument('--model_name',
-                        type=str, default='glow_model_250.pth')
-    args = parser.parse_args()
-    kwargs = vars(args)
-
-
-    main(args, kwargs)
 
 
