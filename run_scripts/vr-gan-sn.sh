@@ -5,8 +5,7 @@ LR=5e-5
 K=8
 J=0
 MLE=0
-srun --gres=gpu:1 --mem=12G \
--p p100,t4 \
+
 python train.py  \
     --fresh  \
     --gan  \

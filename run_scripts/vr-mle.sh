@@ -4,8 +4,7 @@ LR=5e-5
 K=8
 J=0
 MLE=1
-srun --gres=gpu:1 --mem=12G \
--p p100 \
+
 python train.py  \
     --fresh  \
     --gan  \
@@ -41,8 +40,7 @@ python train.py  \
     --no_conv_actnorm 1 \
     --no_learn_top &
 
-srun --gres=gpu:1 --mem=12G \
--p p100 \
+
 python train.py  \
     --fresh  \
     --gan  \

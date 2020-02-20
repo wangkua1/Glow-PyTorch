@@ -4,8 +4,7 @@ MLE=0
 LR=5e-5
 K=8
 for J in 10 1 0.1 0.01 0.001 0; do
-srun --gres=gpu:1 --mem=12G \
--p gpu --account=deadline --qos=deadline \
+
 python train.py  \
     --fresh  \
     --gan  \
@@ -41,8 +40,7 @@ python train.py  \
     --no_conv_actnorm 1 \
     --no_learn_top &
 
-srun --gres=gpu:1 --mem=12G \
--p gpu --account=deadline --qos=deadline \
+
 python train.py  \
     --fresh  \
     --gan  \
