@@ -201,7 +201,7 @@ class FlowStep(nn.Module):
 class FlowNet(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L,
                  actnorm_scale, flow_permutation, flow_coupling,
-                 LU_decomposed, logittransform, sn,affine_eps, no_actnorm,affine_scale_eps,actnorm_max_scale,no_conv_actnorm,affine_max_scale,actnorm_eps):
+                 LU_decomposed, logittransform, sn,affine_eps, no_actnorm,affine_scale_eps,actnorm_max_scale,no_conv_actnorm,affine_max_scale,actnorm_eps,no_split):
         super().__init__()
 
         self.layers = nn.ModuleList()
@@ -241,11 +241,14 @@ class FlowNet(nn.Module):
 
             # 3. Split2d
             if i < L - 1:
-                split = Split2d(num_channels=C)
-                self.splits.append(split)
-                self.layers.append(split)
-                self.output_shapes.append([-1, C // 2, H, W])
-                C = C // 2
+                if no_split:
+                    self.output_shapes.append([-1, C, H, W])
+                else:
+                    split = Split2d(num_channels=C)
+                    self.splits.append(split)
+                    self.layers.append(split)
+                    self.output_shapes.append([-1, C // 2, H, W])
+                    C = C // 2
 
     def forward(self, input, logdet=0., reverse=False, temperature=None):
         if reverse:
@@ -275,7 +278,7 @@ class FlowNet(nn.Module):
 class Glow(nn.Module):
     def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, y_classes,
-                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps):
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,no_split):
         super().__init__()
         self.flow = FlowNet(image_shape=image_shape,
                             hidden_channels=hidden_channels,
@@ -293,7 +296,8 @@ class Glow(nn.Module):
                             actnorm_max_scale=actnorm_max_scale,
                             no_conv_actnorm=no_conv_actnorm,
                             affine_max_scale=affine_max_scale,
-                            actnorm_eps=actnorm_eps)
+                            actnorm_eps=actnorm_eps,
+                            no_split=no_split)
         self.y_classes = y_classes
         self.y_condition = y_condition
 
@@ -335,28 +339,30 @@ class Glow(nn.Module):
         return split_feature(h, "split")
 
     def forward(self, x=None, y_onehot=None, z=None, temperature=None,
-                reverse=False, use_last_split=False,batch_size=0,return_details=0):
+                reverse=False, use_last_split=False,batch_size=0,return_details=0, correction=True):
         if reverse:
             assert z is not None or batch_size > 0
             return self.reverse_flow(z, y_onehot, temperature, use_last_split,batch_size)
         else:
-            z, bpd, y_logits, (prior, logdet) = self.normal_flow(x, y_onehot)
+            z, bpd, y_logits, (prior, logdet) = self.normal_flow(x, y_onehot, correction)
             if return_details:
                 return z, bpd, y_logits, (prior, logdet)
             else:
                 return z, bpd, y_logits
 
-    def normal_flow(self, x, y_onehot):
+    def normal_flow(self, x, y_onehot, correction):
         b, c, h, w = x.shape
 
-        x, logdet = uniform_binning_correction(x)
+        if correction:
+            x, logdet = uniform_binning_correction(x)
+        else:
+            logdet = torch.zeros(len(x)).to(x.device)
 
         z, logdet = self.flow(x, logdet=logdet, reverse=False)
         # print(logdet.max().item(), logdet.min().item())
         mean, logs = self.prior(x, y_onehot)
         prior = gaussian_likelihood(mean, logs, z)
         # print(prior.max().item(), prior.min().item())
-        
         if self.y_condition:
             y_logits = self.project_class(z.mean(2).mean(2))
         else:
