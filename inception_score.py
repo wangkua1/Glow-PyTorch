@@ -173,11 +173,15 @@ def run_fid(data, sample):
     assert data.max() <=1 and  data.min() >= 0
     assert sample.max() <=1 and  sample.min() >= 0
     data = 2*data - 1
-    data = data.repeat(1,3,1,1).detach()      
+    if data.shape[1] == 1:
+        data = data.repeat(1,3,1,1)
+    data = data.detach()      
     with torch.no_grad():
         iss, _, _, acts_real = inception_score(data, cuda=True, batch_size=32, resize=True, splits=10, return_preds=True)
     sample = 2*sample - 1
-    sample = sample.repeat(1,3,1,1).detach()
+    if sample.shape[1] == 1:
+        sample = sample.repeat(1,3,1,1)
+    sample = sample.detach()
 
     with torch.no_grad():
         issf, _, _, acts_fake = inception_score(sample, cuda=True, batch_size=32, resize=True, splits=10, return_preds=True)
