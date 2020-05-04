@@ -3,10 +3,10 @@ import math
 import torch
 import torch.nn as nn
 
-from modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
+from .modules import (Conv2d, Conv2dZeros, ActNorm2d, InvertibleConv1x1,
                      Permute2d, LinearZeros, SqueezeLayer,
                      Split2d, gaussian_likelihood, gaussian_sample)
-from utils import split_feature, uniform_binning_correction
+from .utils import split_feature, uniform_binning_correction
 
 
 def get_block(in_channels, out_channels, hidden_channels):
