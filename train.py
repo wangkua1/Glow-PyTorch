@@ -10,18 +10,16 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
 
-# from ignite.contrib.handlers import ProgressBar
-# from ignite.engine import Engine, Events
-# from ignite.handlers import ModelCheckpoint, Timer
-# from ignite.metrics import RunningAverage, Loss
-
-from datasets import get_CIFAR10, get_SVHN
+from datasets import get_CIFAR10, get_SVHN, postprocess
 from model import Glow
-
+import torchvision.utils as vutils
 from csv_logger import CSVLogger, plot_csv
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+
+from inception_score import inception_score, run_fid
+
 def check_manual_seed(seed):
     seed = seed or random.randint(1, 10000)
     random.seed(seed)
@@ -29,7 +27,11 @@ def check_manual_seed(seed):
 
     print('Using seed: {seed}'.format(seed=seed))
 
-
+def cycle(loader):
+    while True:
+        for data in loader:
+            yield data
+            
 def check_dataset(dataset, dataroot, augment, download):
     if dataset == 'cifar10':
         cifar10 = get_CIFAR10(augment, dataroot, download)
@@ -73,6 +75,18 @@ def compute_loss_y(nll, y_logits, y_weight, y, multi_class, reduction='mean'):
 
     return losses
 
+def generate_from_noise(model, batch_size, device, clamp=False, guard_nans=True):
+    _, c2, h, w  = model.prior_h.shape
+    c = c2 // 2
+    zshape = (batch_size, c, h, w)
+    randz  = torch.randn(zshape).to(device)
+    randz  = torch.autograd.Variable(randz, requires_grad=True)
+    if clamp:
+        randz = torch.clamp(randz,-5,5)
+    images = model(z= randz, y_onehot=None, temperature=1, reverse=True) 
+    if guard_nans:
+        images[(images!=images)] = 0
+    return images
 
 def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          epochs, saved_model, seed, hidden_channels, K, L, actnorm_scale,
@@ -112,7 +126,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     lr_lambda = lambda epoch: lr * min(1., epoch / warmup)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    iteration_fieldnames = ['global_iteration','train_bpd','test_bpd']
+    iteration_fieldnames = ['global_iteration','train_bpd','test_bpd', 'fid']
     iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'iteration_log.csv'))
     
@@ -158,21 +172,9 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             else:
                 z, nll, y_logits = model(x, None)
                 losses = compute_loss(nll)
-        # with torch.no_grad():
-            # # Inception score
-            # N = 200
-            # sample = torch.cat([generate_from_noise(model, args.batch_size, clamp=clamp) for _ in range(200//args.batch_size+1)],0 )[:N]
-            # sample = sample + .5
-            
-            # x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
-            # x_real = x_real + .5
-            # if (sample!=sample).float().sum() > 0:
-            #     myprint("Sample NaNs")
-            #     raise
-            # else:
-            #     fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
-            #     myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
+
         return losses
+
 
     # load pre-trained model if given
     if saved_model:
@@ -209,7 +211,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             model(init_batches, init_targets)
         start_epoch = 1
     # 
-
+    test_iter = cycle(test_loader)
     for epoch in range(start_epoch , epochs):
         scheduler.step()
 
@@ -231,7 +233,23 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             pbar.set_postfix_str(f"Eval -- {lstr}")
         losses = dict([(k, np.mean(v)) for k, v in losses.items()])
         test_bpd = losses['nll']
-        
+        # fid 
+        with torch.no_grad():
+            # Inception score
+            N = 1000
+            sample = torch.cat([generate_from_noise(model, eval_batch_size, device, clamp=False) for _ in range(200//eval_batch_size+1)],0 )[:N]
+            sample = sample + .5
+            
+            x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//eval_batch_size+1)],0 )[:N]
+            x_real = x_real + .5
+            if (sample!=sample).float().sum() > 0:
+                myprint("Sample NaNs")
+                raise
+            fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
+
+        # vis
+        samples = generate_from_noise(model, 64, device, clamp=False) 
+        vutils.save_image(postprocess(samples), os.path.join(output_dir, f'samples_{epoch}.jpeg') , normalize=True, nrow=8) 
 
         # Train
         losses = defaultdict(list)
@@ -251,6 +269,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 'global_iteration': epoch ,
                 'test_bpd': test_bpd,
                 'train_bpd': train_bpd,
+                'fid': fid
                 }
         iteration_logger.writerow(stats_dict)
         plot_csv(iteration_logger.filename)
