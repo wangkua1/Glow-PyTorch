@@ -123,7 +123,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     model = model.to(device)
     optimizer = optim.Adamax(model.parameters(), lr=lr, weight_decay=5e-5)
 
-    lr_lambda = lambda epoch: lr * min(1., epoch / warmup)
+    lr_lambda = lambda epoch: min(1.0, float(epoch) / warmup)  # noqa    
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     iteration_fieldnames = ['global_iteration','train_bpd','test_bpd', 'fid']
