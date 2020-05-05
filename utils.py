@@ -32,7 +32,7 @@ def uniform_binning_correction(x, n_bits=8):
     b, c, h, w = x.size()
     n_bins = 2**n_bits
     chw = c * h * w
-    x += torch.zeros_like(x).uniform_(0, 1.0 / n_bins)
+    x = x + torch.zeros_like(x).uniform_(0, 1.0 / n_bins)
 
     objective = -math.log(n_bins) * chw * torch.ones(b, device=x.device)
     return x, objective

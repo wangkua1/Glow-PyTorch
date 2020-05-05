@@ -10,15 +10,18 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
 
-from ignite.contrib.handlers import ProgressBar
-from ignite.engine import Engine, Events
-from ignite.handlers import ModelCheckpoint, Timer
-from ignite.metrics import RunningAverage, Loss
+# from ignite.contrib.handlers import ProgressBar
+# from ignite.engine import Engine, Events
+# from ignite.handlers import ModelCheckpoint, Timer
+# from ignite.metrics import RunningAverage, Loss
 
 from datasets import get_CIFAR10, get_SVHN
 from model import Glow
 
-
+from csv_logger import CSVLogger, plot_csv
+import numpy as np
+from tqdm import tqdm
+from collections import defaultdict
 def check_manual_seed(seed):
     seed = seed or random.randint(1, 10000)
     random.seed(seed)
@@ -109,7 +112,12 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     lr_lambda = lambda epoch: lr * min(1., epoch / warmup)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    def step(engine, batch):
+    iteration_fieldnames = ['global_iteration','train_bpd','test_bpd']
+    iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
+                             filename=os.path.join(output_dir, 'iteration_log.csv'))
+    
+
+    def step(batch):
         model.train()
         optimizer.zero_grad()
 
@@ -135,7 +143,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
         return losses
 
-    def eval_step(engine, batch):
+    def eval_step(batch):
         model.eval()
 
         x, y = batch
@@ -149,34 +157,22 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                                         multi_class, reduction='none')
             else:
                 z, nll, y_logits = model(x, None)
-                losses = compute_loss(nll, reduction='none')
-
+                losses = compute_loss(nll)
+        # with torch.no_grad():
+            # # Inception score
+            # N = 200
+            # sample = torch.cat([generate_from_noise(model, args.batch_size, clamp=clamp) for _ in range(200//args.batch_size+1)],0 )[:N]
+            # sample = sample + .5
+            
+            # x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
+            # x_real = x_real + .5
+            # if (sample!=sample).float().sum() > 0:
+            #     myprint("Sample NaNs")
+            #     raise
+            # else:
+            #     fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
+            #     myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
         return losses
-
-    trainer = Engine(step)
-    checkpoint_handler = ModelCheckpoint(output_dir, 'glow', save_interval=1,
-                                         n_saved=2, require_empty=False)
-
-    trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler,
-                              {'model': model, 'optimizer': optimizer})
-
-    monitoring_metrics = ['total_loss']
-    RunningAverage(output_transform=lambda x: x['total_loss']).attach(trainer, 'total_loss')
-
-    evaluator = Engine(eval_step)
-
-    # Note: replace by https://github.com/pytorch/ignite/pull/524 when released
-    Loss(lambda x, y: torch.mean(x), output_transform=lambda x: (x['total_loss'], torch.empty(x['total_loss'].shape[0]))).attach(evaluator, 'total_loss')
-
-    if y_condition:
-        monitoring_metrics.extend(['nll'])
-        RunningAverage(output_transform=lambda x: x['nll']).attach(trainer, 'nll')
-
-        # Note: replace by https://github.com/pytorch/ignite/pull/524 when released
-        Loss(lambda x, y: torch.mean(x), output_transform=lambda x: (x['nll'], torch.empty(x['nll'].shape[0]))).attach(evaluator, 'nll')
-
-    pbar = ProgressBar()
-    pbar.attach(trainer, metric_names=monitoring_metrics)
 
     # load pre-trained model if given
     if saved_model:
@@ -188,16 +184,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
         file_name, ext = os.path.splitext(saved_model)
         resume_epoch = int(file_name.split('_')[-1])
-
-        @trainer.on(Events.STARTED)
-        def resume_training(engine):
-            engine.state.epoch = resume_epoch
-            engine.state.iteration = resume_epoch * len(engine.state.dataloader)
-
-    @trainer.on(Events.STARTED)
-    def init(engine):
+        start_epoch = resume_epoch
+    else:
+        # Init
         model.train()
-
         init_batches = []
         init_targets = []
 
@@ -217,29 +207,54 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 init_targets = None
 
             model(init_batches, init_targets)
+        start_epoch = 1
+    # 
 
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def evaluate(engine):
-        evaluator.run(test_loader)
-
+    for epoch in range(start_epoch , epochs):
         scheduler.step()
-        metrics = evaluator.state.metrics
 
-        losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
+        # ckpt
+        torch.save(model.state_dict(), os.path.join(output_dir,  f'glow_model_{epoch}.pth'))
+        torch.save(optimizer.state_dict(), os.path.join(output_dir,  f'glow_optimizer_{epoch}.pth'))
+        if epoch > 1 and os.path.exists(os.path.join(output_dir,  f'glow_model_{epoch-1}.pth')): # remove the previous ckpt to save space
+            os.remove(os.path.join(output_dir,  f'glow_model_{epoch-1}.pth'))
+            os.remove(os.path.join(output_dir,  f'glow_optimizer_{epoch-1}.pth'))
+    
+        # evaluate
+        losses = defaultdict(list)
+        pbar = tqdm(test_loader)
+        for batch in pbar:
+            cl = eval_step(batch)
+            for k in cl:
+                losses[k].append(cl[k].item())
+            lstr = ', '.join([f"{k}: {np.mean(v):.3f}" for k, v in losses.items()])
+            pbar.set_postfix_str(f"Eval -- {lstr}")
+        losses = dict([(k, np.mean(v)) for k, v in losses.items()])
+        test_bpd = losses['nll']
+        
 
-        print(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
+        # Train
+        losses = defaultdict(list)
+        pbar = tqdm(train_loader)
+        for batch in pbar:
+            cl = step(batch)
+            for k in cl:
+                losses[k].append(cl[k].item())
+            lstr = ', '.join([f"{k}: {np.mean(v):.3f}" for k, v in losses.items()])
+            pbar.set_postfix_str(f"Train -- {lstr}")
+        losses = dict([(k, np.mean(v)) for k, v in losses.items()])
+        train_bpd = losses['nll']
+        
 
-    timer = Timer(average=True)
-    timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
-                 pause=Events.ITERATION_COMPLETED, step=Events.ITERATION_COMPLETED)
-
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def print_times(engine):
-        pbar.log_message(f'Epoch {engine.state.epoch} done. Time per batch: {timer.value():.3f}[s]')
-        timer.reset()
-
-    trainer.run(train_loader, epochs)
-
+        # log 
+        stats_dict = {
+                'global_iteration': epoch ,
+                'test_bpd': test_bpd,
+                'train_bpd': train_bpd,
+                }
+        iteration_logger.writerow(stats_dict)
+        plot_csv(iteration_logger.filename)
+        
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -356,7 +371,7 @@ if __name__ == '__main__':
                         type=int, default=0,
                         help='manual seed')
     parser.add_argument('--db', action='store_true')
-
+    
     args = parser.parse_args()
     kwargs = vars(args)
 
