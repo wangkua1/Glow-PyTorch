@@ -75,8 +75,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          epochs, saved_model, seed, hidden_channels, K, L, actnorm_scale,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
-         n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh):
+         n_workers, cuda, n_init_batches, output_dir,
+         saved_optimizer, warmup, fresh, db):
 
     device = 'cpu' if (not torch.cuda.is_available() or not cuda) else 'cuda:0'
 
@@ -84,7 +84,11 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     ds = check_dataset(dataset, dataroot, augment, download)
     image_shape, num_classes, train_dataset, test_dataset = ds
-
+    if db:
+        train_dataset.data  = train_dataset.data[:1000]
+        train_dataset.targets  = train_dataset.targets[:1000]
+        test_dataset.data  = test_dataset.data[:1000]
+        test_dataset.targets  = test_dataset.targets[:1000]
     # Note: unsupported for now
     multi_class = False
 
@@ -282,8 +286,7 @@ if __name__ == '__main__':
                         dest='LU_decomposed',
                         help='Train with LU decomposed 1x1 convs')
 
-    parser.add_argument('--no_learn_top', action='store_false',
-                        help='Do not train top layer (prior)', dest='learn_top')
+    parser.add_argument('--learn_top', default=1, type=int)
 
     parser.add_argument('--y_condition', action='store_true',
                         help='Train using class condition')
@@ -324,10 +327,6 @@ if __name__ == '__main__':
                         type=float, default=5,
                         help='Warmup learning rate linearly per epoch')
 
-    parser.add_argument('--warmup_steps',
-                        type=int, default=4000,
-                        help='Number of warmup steps for lr initialisation')
-
     parser.add_argument('--n_init_batches',
                         type=int, default=8,
                         help='Number of batches to use for Act Norm initialisation')
@@ -356,6 +355,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed',
                         type=int, default=0,
                         help='manual seed')
+    parser.add_argument('--db', action='store_true')
 
     args = parser.parse_args()
     kwargs = vars(args)
