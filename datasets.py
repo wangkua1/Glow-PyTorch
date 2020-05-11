@@ -40,8 +40,14 @@ def preprocess(x):
 
     return x
 
+cifar10_normalize = transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
+cifar10_unnormalize = transforms.Normalize(mean=[-x / 255.0 for x in [125.3, 123.0, 113.9]], std=[1/(x / 255.0) for x in [63.0, 62.1, 66.7]])
+def postprocess(x, dataset):
+    if dataset == 'cifar10':
+      pass
+    if dataset == 'mnist':
+      pass
 
-def postprocess(x):
     x = torch.clamp(x, -0.5, 0.5)
     x += 0.5
     x = x * 2**n_bits

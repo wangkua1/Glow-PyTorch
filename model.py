@@ -388,3 +388,32 @@ class Glow(nn.Module):
         for name, m in self.named_modules():
             if isinstance(m, ActNorm2d):
                 m.inited = True
+
+class InvDiscriminator(nn.Module):
+    def __init__(self, image_shape, hidden_channels, K, L, actnorm_scale,
+                 flow_permutation, flow_coupling, LU_decomposed, y_classes,
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,no_split):
+        super().__init__()
+        self.flow = FlowNet(image_shape=image_shape,
+                            hidden_channels=hidden_channels,
+                            K=K,
+                            L=L,
+                            actnorm_scale=actnorm_scale,
+                            flow_permutation=flow_permutation,
+                            flow_coupling=flow_coupling,
+                            LU_decomposed=LU_decomposed,
+                            logittransform=logittransform,
+                            sn=sn,
+                            affine_eps=affine_eps,
+                            no_actnorm=no_actnorm,
+                            affine_scale_eps=affine_scale_eps,
+                            actnorm_max_scale=actnorm_max_scale,
+                            no_conv_actnorm=no_conv_actnorm,
+                            affine_max_scale=affine_max_scale,
+                            actnorm_eps=actnorm_eps,
+                            no_split=no_split)
+    def forward(self, x):
+        logdet = torch.zeros(len(x)).to(x.device)
+
+        z, _ = self.flow(x, logdet=logdet, reverse=False)
+        return torch.mean(z.view(x.shape[0], -1), -1, keepdim=True)

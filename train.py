@@ -37,7 +37,7 @@ from ignite.metrics import RunningAverage, Loss
 from torchvision.utils import make_grid
 
 from datasets import get_CIFAR10, get_SVHN, get_MNIST, postprocess
-from model import Glow
+from model import Glow, InvDiscriminator
 import mine
 import matplotlib.pyplot as plt
 import ipdb
@@ -47,7 +47,37 @@ from inception_score import inception_score, run_fid
 from csv_logger import CSVLogger, plot_csv
 import plot_utils
 import utils
+import cgan_models
 device = 'cpu' if (not torch.cuda.is_available()) else 'cuda:0'
+nn = torch.nn
+
+class DCGANDiscriminator(nn.Module):
+    def __init__(self, imgSize, ndf, nc):
+        super(DCGANDiscriminator, self).__init__()
+        
+        self.main = nn.Sequential(
+            # # input is (nc) x 64 x 64
+            # nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+            # nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf) x 32 x 32
+            nn.Conv2d(nc, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*2) x 16 x 16
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*4) x 8 x 8
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (ndf*8) x 4 x 4
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False)
+        )
+        
+    def forward(self, input):
+        output = self.main(input)
+        return output.view(input.size(0), -1).mean(-1, keepdim=True)
 
 def check_manual_seed(seed):
     seed = seed or random.randint(1, 10000)
@@ -187,7 +217,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,init_sample,no_split):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,init_sample,no_split, disc_arch, weight_entropy_reg):
 
     
     check_manual_seed(seed)
@@ -211,8 +241,17 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
     model = model.to(device)
     
+    if disc_arch == 'mine':
+        discriminator = mine.Discriminator(image_shape[-1])
+    elif disc_arch == 'biggan':
+        discriminator = cgan_models.Discriminator(image_channels=image_shape[-1],conditional_D=False)
+    elif disc_arch == 'dcgan':
+        discriminator = DCGANDiscriminator(image_shape[0], 64, image_shape[-1])
+    elif disc_arch == 'inv':
+        discriminator = InvDiscriminator(image_shape, hidden_channels, K, L, actnorm_scale,
+                 flow_permutation, flow_coupling, LU_decomposed, num_classes,
+                 learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps, actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,no_split)
 
-    discriminator = mine.Discriminator(image_shape[-1])
     discriminator = discriminator.to(device)
     D_optimizer = optim.Adam(filter(lambda p: p.requires_grad, discriminator.parameters()), lr=disc_lr, betas=(.5, .99), weight_decay=0)
     if optim_name =='adam':
@@ -253,6 +292,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         x, y = batch
         x = x.to(device)
 
+        # ipdb.set_trace()
         
         
 
@@ -311,6 +351,11 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             loss = loss +  weight_prior * -prior.mean()
         if weight_logdet > 0:
             loss = loss + weight_logdet * -logdet.mean()
+
+        if weight_entropy_reg > 0:
+            _, _, _, (sample_prior, sample_logdet)= model.forward(fake, None, return_details=True)
+            # notice this is actually "decreasing" sample likelihood.
+            loss = loss + weight_entropy_reg * (sample_prior.mean() + sample_logdet.mean())
         # loss =   weight_gan * G_loss \
         #         +weight_prior * -prior.mean() \
         #         +weight_logdet * -logdet.mean()
@@ -362,7 +407,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
             # Replace NaN gradient with 0
             for p in model.parameters(): 
-                if p.requires_grad:
+                if p.requires_grad and p.grad is not None:
                     g = p.grad.data
                     g[g!=g] = 0
 
@@ -395,7 +440,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                 title='NaNs'
             else:
                 title="Good"
-            grid = make_grid((postprocess(fake.detach().cpu())[:30]), nrow=6).permute(1,2,0)
+            grid = make_grid((postprocess(fake.detach().cpu(), dataset)[:30]), nrow=6).permute(1,2,0)
             plt.figure(figsize=(10,10))
             plt.imshow(grid)
             plt.axis('off')
@@ -403,7 +448,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
         if engine.iter_ind  % eval_every==0:
-            torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
+            # torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
 
             model.eval()
 
@@ -498,7 +543,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     # else:
     #     trainer = Engine(step)
     checkpoint_handler = ModelCheckpoint(output_dir, 'glow', save_interval=5,
-                                         n_saved=1000, require_empty=False)
+                                         n_saved=1, require_empty=False)
 
     trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler,
                               {'model': model, 'optimizer': optimizer})
@@ -735,7 +780,7 @@ if __name__ == '__main__':
                         type=int, default=0,
                         help='manual seed')
     parser.add_argument('--logittransform',
-                        action='store_true')
+                       type=int, default=0)
     parser.add_argument('--gan',
                         action='store_true')
     parser.add_argument('--sn', type=int, default=0)
@@ -745,6 +790,7 @@ if __name__ == '__main__':
     parser.add_argument('--ld_on_samples', type=int, default=0)
     parser.add_argument('--weight_prior', type=float, default=0)
     parser.add_argument('--weight_logdet', type=float, default=0)
+    parser.add_argument('--weight_entropy_reg', type=float, default=0)
     parser.add_argument('--jac_reg_lambda', type=float, default=0)
     parser.add_argument('--affine_eps', type=float, default=0)
     parser.add_argument('--disc_lr',type=float, default=1e-5)
@@ -761,6 +807,7 @@ if __name__ == '__main__':
     parser.add_argument('--actnorm_eps',type=float, default=0)
     parser.add_argument('--init_sample',type=int, default=0)
     parser.add_argument('--no_split',type=int, default=0)
+    parser.add_argument('--disc_arch', type=str, default='mine', choices=['dcgan','mine','inv','biggan'])
 
     args = parser.parse_args()
     kwargs = vars(args)
