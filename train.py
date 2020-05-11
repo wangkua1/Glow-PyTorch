@@ -50,6 +50,7 @@ import utils
 import cgan_models
 device = 'cpu' if (not torch.cuda.is_available()) else 'cuda:0'
 nn = torch.nn
+import numpy as np
 
 class DCGANDiscriminator(nn.Module):
     def __init__(self, imgSize, ndf, nc):
@@ -84,7 +85,7 @@ def check_manual_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
 
-    myprint('Using seed: {seed}'.format(seed=seed))
+    print('Using seed: {seed}'.format(seed=seed))
 
 def gradient_penalty(x, y, f):
     """From https://github.com/LynnHo/Pytorch-WGAN-GP-DRAGAN-Celeba/blob/master/train_celeba_wgan_gp.py
@@ -200,6 +201,7 @@ def cycle(loader):
             yield data
 
 def generate_from_noise(model, batch_size,clamp=False, guard_nans=True):
+    assert not clamp
     _, c2, h, w  = model.prior_h.shape
     c = c2 // 2
     zshape = (batch_size, c, h, w)
@@ -217,7 +219,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
          flow_permutation, flow_coupling, LU_decomposed, learn_top,
          y_condition, y_weight, max_grad_clip, max_grad_norm, lr,
          n_workers, cuda, n_init_batches, warmup_steps, output_dir,
-         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,init_sample,no_split, disc_arch, weight_entropy_reg):
+         saved_optimizer, warmup, fresh,logittransform, gan, disc_lr,sn,flowgan, eval_every, ld_on_samples, weight_gan, weight_prior,weight_logdet, jac_reg_lambda,affine_eps, no_warm_up, optim_name,clamp, svd_every, eval_only,no_actnorm,affine_scale_eps,actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,init_sample,no_split, disc_arch, weight_entropy_reg,db):
 
     
     check_manual_seed(seed)
@@ -234,7 +236,6 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     test_loader = data.DataLoader(test_dataset, batch_size=eval_batch_size,
                                   shuffle=False, num_workers=n_workers,
                                   drop_last=False)
-    test_iter = cycle(test_loader)
     model = Glow(image_shape, hidden_channels, K, L, actnorm_scale,
                  flow_permutation, flow_coupling, LU_decomposed, num_classes,
                  learn_top, y_condition,logittransform,sn,affine_eps,no_actnorm,affine_scale_eps, actnorm_max_scale, no_conv_actnorm,affine_max_scale,actnorm_eps,no_split)
@@ -263,7 +264,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         lr_lambda = lambda epoch: min(1.0, (epoch + 1) / warmup) 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    iteration_fieldnames = ['global_iteration', 'fid','sample_pad', 'bpd','pad','real_acc','fake_acc','acc']
+    iteration_fieldnames = ['global_iteration', 'fid','sample_pad', 'train_bpd','eval_bpd', 'pad','batch_real_acc','batch_fake_acc','batch_acc']
     iteration_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'iteration_log.csv'))
     iteration_fieldnames = ['global_iteration' 
@@ -276,8 +277,13 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
     svd_logger = CSVLogger(fieldnames=iteration_fieldnames,
                              filename=os.path.join(output_dir, 'svd_log.csv'))
 
-    
+    # 
+    test_iter = test_loader.__iter__()
+    N_inception = 1000
+    x_real_inception = torch.cat([test_iter.__next__()[0].to(device) for _ in range(N_inception//args.batch_size+1)],0 )[:N_inception]
+    x_real_inception = x_real_inception + .5        
     x_for_recon = test_iter.__next__()[0].to(device)
+
     def gan_step(engine, batch):
         assert not y_condition
         if 'iter_ind' in dir(engine):
@@ -292,57 +298,46 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         x, y = batch
         x = x.to(device)
 
-        # ipdb.set_trace()
-        
-        
-
 
         def run_noised_disc(discriminator, x):
             x = uniform_binning_correction(x)[0]
             return discriminator(x)
         
-        # # Train Disc
-        # for  _ in range(20):
-        #     # for module in model.flow.layers:
-        #     #     if "FlowStep"  in str(module.__class__):
-        #     #         module.eval()
-        #     # model.flow.eval()
-        #     # model.eval()
-        #     fake = generate_from_noise(model, x.size(0))
-        #     # for module in model.flow.layers:
-        #     #     if "FlowStep"  in str(module.__class__):
-        #     #         module.train()
-        #     # model.flow.train()
-        #     # model.train()
-        fake = generate_from_noise(model, x.size(0), clamp=clamp)
+        real_acc = fake_acc = acc = 0
+        if weight_gan > 0:
+            fake = generate_from_noise(model, x.size(0), clamp=clamp)
 
-        D_real_scores = run_noised_disc(discriminator, x.detach())
-        D_fake_scores = run_noised_disc(discriminator, fake.detach())
+            D_real_scores = run_noised_disc(discriminator, x.detach())
+            D_fake_scores = run_noised_disc(discriminator, fake.detach())
 
-        ones_target = torch.ones((x.size(0), 1), device=x.device)
-        zeros_target = torch.zeros((x.size(0), 1), device=x.device)
+            ones_target = torch.ones((x.size(0), 1), device=x.device)
+            zeros_target = torch.zeros((x.size(0), 1), device=x.device)
 
-        D_real_accuracy = torch.sum(torch.round(F.sigmoid(D_real_scores)) == ones_target).float() / ones_target.size(0)
-        D_fake_accuracy = torch.sum(torch.round(F.sigmoid(D_fake_scores)) == zeros_target).float() / zeros_target.size(0)
+            D_real_accuracy = torch.sum(torch.round(F.sigmoid(D_real_scores)) == ones_target).float() / ones_target.size(0)
+            D_fake_accuracy = torch.sum(torch.round(F.sigmoid(D_fake_scores)) == zeros_target).float() / zeros_target.size(0)
 
-        D_real_loss = F.binary_cross_entropy_with_logits(D_real_scores, ones_target)
-        D_fake_loss = F.binary_cross_entropy_with_logits(D_fake_scores, zeros_target)
+            D_real_loss = F.binary_cross_entropy_with_logits(D_real_scores, ones_target)
+            D_fake_loss = F.binary_cross_entropy_with_logits(D_fake_scores, zeros_target)
 
-        D_loss = (D_real_loss + D_fake_loss) / 2
-        gp = gradient_penalty(x.detach(), fake.detach(), lambda _x: run_noised_disc(discriminator, _x))
-        D_loss_plus_gp = D_loss  + 10*gp
-        D_optimizer.zero_grad()
-        D_loss_plus_gp.backward()
-        D_optimizer.step()
+            D_loss = (D_real_loss + D_fake_loss) / 2
+            gp = gradient_penalty(x.detach(), fake.detach(), lambda _x: run_noised_disc(discriminator, _x))
+            D_loss_plus_gp = D_loss  + 10*gp
+            D_optimizer.zero_grad()
+            D_loss_plus_gp.backward()
+            D_optimizer.step()
 
 
-        # Train generator
-        fake = generate_from_noise(model, x.size(0), clamp=clamp, guard_nans=False)
-        G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
+            # Train generator
+            fake = generate_from_noise(model, x.size(0), clamp=clamp, guard_nans=False)
+            G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
+
+            # Trace
+            real_acc = D_real_accuracy.item(),
+            fake_acc = D_fake_accuracy.item(),
+            acc = .5*(D_fake_accuracy.item()+D_real_accuracy.item())
 
         z, nll, y_logits, (prior, logdet)= model.forward(x, None, return_details=True)
-        nll = nll.mean()
-        
+        train_bpd = nll.mean().item() 
 
         loss = 0
         if weight_gan > 0:
@@ -356,9 +351,6 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             _, _, _, (sample_prior, sample_logdet)= model.forward(fake, None, return_details=True)
             # notice this is actually "decreasing" sample likelihood.
             loss = loss + weight_entropy_reg * (sample_prior.mean() + sample_logdet.mean())
-        # loss =   weight_gan * G_loss \
-        #         +weight_prior * -prior.mean() \
-        #         +weight_logdet * -logdet.mean()
         # Jac Reg
         if jac_reg_lambda > 0:
             # Sample
@@ -399,7 +391,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         if not eval_only:
             optimizer.zero_grad()
             loss.backward()
-
+            if not db:
+                assert max_grad_clip == max_grad_norm == 0
             if max_grad_clip > 0:
                 torch.nn.utils.clip_grad_value_(model.parameters(), max_grad_clip)
             if max_grad_norm > 0:
@@ -411,25 +404,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
                     g = p.grad.data
                     g[g!=g] = 0
 
-
             optimizer.step()
-
-
-        # scales = []
-        # for module in model.flow.layers:
-        #     if "FlowStep"  in str(module.__class__):
-        #         scales.append(module.last_scale.view(-1))
-        # scales = torch.cat(scales)
-        # print("Scales...")
-        # print(torch.max(scales).item(), torch.min(scales).item())
-
-        # scales = []
-        # for module in model.flow.layers:
-        #     if "FlowStep"  in str(module.__class__):
-        #         scales.append(module.actnorm.last_scale.view(-1))
-        # scales = torch.cat(scales)
-        # print("AN Scales...")
-        # print(torch.max(scales).item(), torch.min(scales).item())
 
         if engine.iter_ind  % 100==0:
             fake = generate_from_noise(model, x.size(0), clamp=clamp)
@@ -453,45 +428,40 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             model.eval()
 
             with torch.no_grad():
-                # plot recon
+                # Plot recon
                 fpath = os.path.join(output_dir, '_recon', f'recon_{engine.iter_ind}.png')
-                
                 sample_pad = run_recon_evolution(model, generate_from_noise(model, args.batch_size, clamp=clamp).detach(), fpath)
-                myprint(f"Iter: {engine.iter_ind}, Recon Sample PAD: {sample_pad}")
+                print(f"Iter: {engine.iter_ind}, Recon Sample PAD: {sample_pad}")
 
                 pad = run_recon_evolution(model, x_for_recon, fpath)
-                myprint(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
+                print(f"Iter: {engine.iter_ind}, Recon PAD: {pad}")
                 pad =  pad.item()
                 sample_pad  =  sample_pad.item()
 
-                # pad = sample_pad  =  0
-
                 # Inception score
-                N = 200
-                sample = torch.cat([generate_from_noise(model, args.batch_size, clamp=clamp) for _ in range(200//args.batch_size+1)],0 )[:N]
+                sample = torch.cat([generate_from_noise(model, args.batch_size, clamp=clamp) for _ in range(N_inception//args.batch_size+1)],0 )[:N_inception]
                 sample = sample + .5
                 
-                x_real = torch.cat([test_iter.__next__()[0].to(device) for _ in range(200//args.batch_size+1)],0 )[:N]
-                x_real = x_real + .5
                 if (sample!=sample).float().sum() > 0:
-                    myprint("Sample NaNs")
+                    print("Sample NaNs")
                     raise
                 else:
-                    fid =  run_fid(x_real.clamp_(0,1),sample.clamp_(0,1) )
-                    myprint(f'fid: {fid}, global_iter: {engine.iter_ind}')
+                    fid =  run_fid(x_real_inception.clamp_(0,1),sample.clamp_(0,1) )
+                    print(f'fid: {fid}, global_iter: {engine.iter_ind}')
+
+                # Eval BPD
+                eval_bpd = np.mean([model.forward(x.to(device), None, return_details=True)[1].mean().item() for x, _ in test_loader])
+
                 stats_dict = {
                         'global_iteration': engine.iter_ind ,
                         'fid': fid,
-                        'bpd': torch.mean(nll).item(),
+                        'train_bpd': train_bpd,
                         'pad': pad,
+                        'eval_bpd': eval_bpd,
                         'sample_pad': sample_pad,
-                        'real_acc':0,
-                        'fake_acc': 0,
-                        'acc': 0
-                
-                        # 'real_acc': D_real_accuracy.item(),
-                        # 'fake_acc': D_fake_accuracy.item(),
-                        # 'acc': .5*(D_fake_accuracy.item()+D_real_accuracy.item())
+                        'batch_real_acc':real_acc,
+                        'batch_fake_acc':fake_acc,
+                        'batch_acc':acc
                 }
                 iteration_logger.writerow(stats_dict)
                 plot_csv(iteration_logger.filename)
@@ -633,7 +603,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
 
         losses = ', '.join([f"{key}: {value:.2f}" for key, value in metrics.items()])
 
-        myprint(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
+        print(f'Validation Results - Epoch: {engine.state.epoch} {losses}')
 
     timer = Timer(average=True)
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -808,6 +778,7 @@ if __name__ == '__main__':
     parser.add_argument('--init_sample',type=int, default=0)
     parser.add_argument('--no_split',type=int, default=0)
     parser.add_argument('--disc_arch', type=str, default='mine', choices=['dcgan','mine','inv','biggan'])
+    parser.add_argument('--db', type=int, default=0)
 
     args = parser.parse_args()
     kwargs = vars(args)
@@ -829,10 +800,10 @@ if __name__ == '__main__':
 
     log_file = os.path.join(args.output_dir, 'log.txt')
     log = open(log_file, 'w')
-
-    def myprint(*content):
-        print(*content)
-        print(*content, file=log)
+    _print = print
+    def print(*content):
+        _print(*content)
+        _print(*content, file=log)
         log.flush()
 
     main(**kwargs)

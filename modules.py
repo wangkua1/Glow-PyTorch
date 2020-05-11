@@ -63,65 +63,6 @@ def unsqueeze2d(input, factor):
 
     return x
 
-# # ActNorm Layer with data-dependant init
-# class ActNorm2d(nn.Module):
-#     def __init__(self, num_features, logscale_factor=1., scale=1., stable_eps=1e-3):
-#         super(ActNorm2d, self).__init__()
-#         self.initialized = False
-#         self.logscale_factor = logscale_factor
-#         self.scale = scale
-#         self.register_parameter('b', nn.Parameter(torch.zeros(1, num_features, 1)))
-#         self.register_parameter('logs', nn.Parameter(torch.zeros(1, num_features, 1)))
-#         self.stable_eps = stable_eps
-
-#     def forward(self, input, logdet=None, reverse=False):
-#         if reverse:
-#             input, logdet = self.reverse_(input,  logdet)
-#         else:
-#             input, logdet = self.forward_(input, logdet)
-
-#         return input, logdet
-
-#     def forward_(self, input, objective):
-#         input_shape = input.size()
-#         input = input.view(input_shape[0], input_shape[1], -1)  # Compresses the two spatial dimensions into 1 (512, 1024, 1)
-
-#         if not self.initialized:
-#             self.initialized = True
-#             unsqueeze = lambda x: x.unsqueeze(0).unsqueeze(-1).detach()
-
-#             # Compute the mean and variance
-#             sum_size = input.size(0) * input.size(-1)
-#             b = -torch.sum(input, dim=(0, -1)) / sum_size  # Computes the (negative) mean of the input features
-#             vars = unsqueeze(torch.sum((input + unsqueeze(b)) ** 2, dim=(0, -1)) / (sum_size-1))
-#             logs = torch.log(self.scale / (torch.sqrt(vars) + 1e-6)) / self.logscale_factor
-
-#             self.b.data.copy_(unsqueeze(b).data)
-#             self.logs.data.copy_(logs.data)
-
-#         logs = self.logs * self.logscale_factor
-#         b = self.b
-
-#         output = (input + b) * (torch.exp(logs) +  self.stable_eps)
-#         dlogdet = torch.sum(torch.log(torch.exp(logs) +  self.stable_eps)) * input.size(-1) # c x h
-#         if objective is not None:
-#             objective = objective + dlogdet
-
-#         return output.view(input_shape), objective
-
-#     def reverse_(self, input, objective):
-#         assert self.initialized
-#         input_shape = input.size()
-#         input = input.view(input_shape[0], input_shape[1], -1)
-#         logs = self.logs * self.logscale_factor
-#         b = self.b
-#         output = input / (torch.exp(logs)+ self.stable_eps) - b
-#         dlogdet = torch.sum(torch.log(torch.exp(logs) +  self.stable_eps)) * input.size(-1) # c x h
-
-#         if objective is not None:
-#             objective = objective - dlogdet
-
-#         return output.view(input_shape), objective 
 
 class _ActNorm(nn.Module):
     """
