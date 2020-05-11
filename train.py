@@ -332,8 +332,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             G_loss = F.binary_cross_entropy_with_logits(run_noised_disc(discriminator, fake), torch.ones((x.size(0), 1), device=x.device))
 
             # Trace
-            real_acc = D_real_accuracy.item(),
-            fake_acc = D_fake_accuracy.item(),
+            real_acc = D_real_accuracy.item()
+            fake_acc = D_fake_accuracy.item()
             acc = .5*(D_fake_accuracy.item()+D_real_accuracy.item())
 
         z, nll, y_logits, (prior, logdet)= model.forward(x, None, return_details=True)
