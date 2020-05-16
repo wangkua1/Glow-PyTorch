@@ -407,8 +407,9 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             optimizer.step()
 
         if engine.iter_ind  % 100==0:
-            fake = generate_from_noise(model, x.size(0), clamp=clamp)
-            z = model.forward(fake, None, return_details=True)[0]
+            with torch.no_grad():
+                fake = generate_from_noise(model, x.size(0), clamp=clamp)
+                z = model.forward(fake, None, return_details=True)[0]
             print("Z max min")
             print(z.max().item(), z.min().item())
             if (fake!=fake).float().sum() > 0:
