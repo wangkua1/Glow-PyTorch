@@ -294,7 +294,9 @@ class Split2d(nn.Module):
             z1, z2 = split_feature(input, "split")
             self._last_z2 = z2.clone()
             mean, logs = self.split2d_prior(z1)
-            logdet = gaussian_likelihood(mean, logs, z2) + logdet
+            d = gaussian_likelihood(mean, logs, z2)
+            logdet = d + logdet
+            self._last_logdet = d
             return z1, logdet
 
 

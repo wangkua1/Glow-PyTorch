@@ -1,7 +1,7 @@
 DR=data
 # MLE=0
 # LR=5e-5
-K=32
+K=2
 J=0
 WG=0
 MLE=1
@@ -12,8 +12,8 @@ SAVE=${ROOT1}/flow-gan
 for LR in 5e-4; do
 for bs in 64; do
 for LT in 0; do
-for h in 512; do
-for exp in 4 ; do
+for h in 10; do
+for exp in 0 1 ; do
 AMS=0
 GP=0
 db=0
@@ -25,24 +25,8 @@ case "$exp" in
 ;; 
 1)
     c=affine
-    eps=0.01
+    eps=0
 ;;  
-2)
-    c=additive
-    eps=0
-    AMS=5
-;;
-3)
-    c=affine
-    eps=0.01
-    AMS=5
-;;
-4)
-    c=affine
-    eps=0
-    AMS=0
-    perm=invconv
-;;
 esac
 
 cmd="train.py  \
@@ -65,7 +49,7 @@ cmd="train.py  \
     --jac_reg_lambda ${J} \
     --flowgan 1 \
     --dataroot ${DR} \
-    --output_dir ${SAVE}/cifar10-mle-big/${c}-${exp} \
+    --output_dir ${SAVE}/cifar10-mle-small-db/${c}-${exp} \
     --eval_every 1000 \
     --optim_name adamax \
     --svd_every 100000000000 \
@@ -75,7 +59,7 @@ cmd="train.py  \
     --no_conv_actnorm 0 \
     --actnorm_max_scale ${AMS} \
     --logittransform $LT \
-    --epochs 500 \
+    --epochs 2 \
     --db ${db}"
 
 

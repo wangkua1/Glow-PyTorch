@@ -424,7 +424,7 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
         if engine.iter_ind  % eval_every==0:
-            # torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
+            torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
 
             model.eval()
 
@@ -471,7 +471,8 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         if  engine.iter_ind + 2 % svd_every == 0:
             model.eval()
             svd_dict = {}
-            D_for, D_inv = utils.computeSVDjacobian(x_for_recon, model, inverse=False)
+            ret = utils.computeSVDjacobian(x_for_recon, model)
+            D_for, D_inv = ret['D_for'], ret['D_inv']
             cn = float(D_for.max()/ D_for.min())
             cn_inv = float(D_inv.max()/ D_inv.min())
             svd_dict['global_iteration'] =  engine.iter_ind  
@@ -542,25 +543,25 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
         print("Loading...")
         print(saved_model)
         loaded =  torch.load(saved_model)
-        if 'Glow' in str(type(loaded)):
-            model  = loaded
-        else:
-            raise
         # if 'Glow' in str(type(loaded)):
-        #     loaded  = loaded.state_dict()
-        # model.load_state_dict(loaded)
-        # model.set_actnorm_init()
+        #     model  = loaded
+        # else:
+        #     raise
+        # # if 'Glow' in str(type(loaded)):
+        # #     loaded  = loaded.state_dict()
+        model.load_state_dict(loaded)
+        model.set_actnorm_init()
 
-        # if saved_optimizer:
-        #     optimizer.load_state_dict(torch.load(saved_optimizer))
+        if saved_optimizer:
+            optimizer.load_state_dict(torch.load(saved_optimizer))
 
-        # file_name, ext = os.path.splitext(saved_model)
-        # resume_epoch = int(file_name.split('_')[-1])
+        file_name, ext = os.path.splitext(saved_model)
+        resume_epoch = int(file_name.split('_')[-1])
 
-        # @trainer.on(Events.STARTED)
-        # def resume_training(engine):
-        #     engine.state.epoch = resume_epoch
-        #     engine.state.iteration = resume_epoch * len(engine.state.dataloader)
+        @trainer.on(Events.STARTED)
+        def resume_training(engine):
+            engine.state.epoch = resume_epoch
+            engine.state.iteration = resume_epoch * len(engine.state.dataloader)
 
 
     @trainer.on(Events.STARTED)

@@ -4,13 +4,14 @@ from torch.autograd.gradcheck import zero_gradients
 from torch.autograd import grad
 import numpy as np
 import ipdb
-def computeSVDjacobian(x, model, inverse=False):
+def computeSVDjacobian(x, model, compute_inverse=True):
+    ret_dict={}
     x = x[:1]
     batch_size = x.size(0)
 
     model.eval()
     x.requires_grad_()
-    z = model.forward(x, None, return_details=True)[0]
+    z = model.forward(x, None, correction=False, return_details=True)[0]
     old_z = z.clone()
     zs = [split._last_z2.view(x.size(0),-1) for  split  in model.flow.splits]
     zs = zs + [z.view(batch_size, -1)]
@@ -25,28 +26,32 @@ def computeSVDjacobian(x, model, inverse=False):
             jac[dim_counter,:] = g.mean(0).view(-1).cpu().numpy()
             dim_counter+=1
     Ujac, Djac, Vjac = np.linalg.svd(jac, compute_uv=True, full_matrices=False)
-
+    ret_dict['D_for'] = Djac
+    ret_dict['jac_for'] = jac
     # inverse
-    old_z.requires_grad_()
-    recon = model(y_onehot=None, temperature=1, z=old_z, reverse=True, use_last_split=True) 
-    zs = [split._last_z2 for  split  in model.flow.splits]
-    zs = zs + [old_z]
-    dim = x.view(batch_size, -1).size(1)
-    jac = torch.zeros([dim, dim])
-    recon_flat = recon.view(batch_size, -1)
-    for dim_counter in range(recon_flat.size(1)):
-        if dim_counter % 100 == 0: print(dim_counter)
-        gs = []
-        for z in zs:
-            zero_gradients(z)
-            g = grad(recon_flat[:, dim_counter].sum(), z, retain_graph=True)[0].detach()
-            gs.append(g.view(batch_size,-1))
-        jac[dim_counter,:] = torch.cat(gs,-1).mean(0).view(-1)
-        dim_counter+=1
-    jac = jac.numpy()
-    U_inv, D_inv, V_inv = np.linalg.svd(jac, compute_uv=True, full_matrices=False)
+    if compute_inverse:
+        old_z.requires_grad_()
+        recon = model(y_onehot=None, temperature=1, z=old_z, reverse=True, use_last_split=True) 
+        zs = [split._last_z2 for  split  in model.flow.splits]
+        zs = zs + [old_z]
+        dim = x.view(batch_size, -1).size(1)
+        jac = torch.zeros([dim, dim])
+        recon_flat = recon.view(batch_size, -1)
+        for dim_counter in range(recon_flat.size(1)):
+            if dim_counter % 100 == 0: print(dim_counter)
+            gs = []
+            for z in zs:
+                zero_gradients(z)
+                g = grad(recon_flat[:, dim_counter].sum(), z, retain_graph=True)[0].detach()
+                gs.append(g.view(batch_size,-1))
+            jac[dim_counter,:] = torch.cat(gs,-1).mean(0).view(-1)
+            dim_counter+=1
+        jac = jac.numpy()
+        U_inv, D_inv, V_inv = np.linalg.svd(jac, compute_uv=True, full_matrices=False)
+        ret_dict['D_inv'] = D_inv
+        ret_dict['jac_inv'] = jac
     model.train()
-    return Djac, D_inv
+    return ret_dict
 
 
 
