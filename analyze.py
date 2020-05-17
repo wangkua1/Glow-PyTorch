@@ -53,7 +53,7 @@ def run_analysis(x, model, recon_path):
         # Subtract the conditional gaussian likelihood from the split layers
         analytic_logdet = analytic_logdet - torch.stack([split._last_logdet for  split  in model.flow.splits]).sum(0)
         # The above forward pass was run w/o correction
-        data_bpd = bpd.mean().item() + bpd_correction 
+        data_bpd = bpd.mean().item() - bpd_correction 
 
     with torch.no_grad():
         data_pad = run_recon_evolution(model, 
