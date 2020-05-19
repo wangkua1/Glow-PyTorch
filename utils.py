@@ -25,7 +25,11 @@ def computeSVDjacobian(x, model, compute_inverse=True):
             g = grad(z[:, dim].sum(), x, retain_graph=True)[0].detach()
             jac[dim_counter,:] = g.mean(0).view(-1).cpu().numpy()
             dim_counter+=1
-    Ujac, Djac, Vjac = np.linalg.svd(jac, compute_uv=True, full_matrices=False)
+    try:
+        Djac = np.linalg.svd(jac, compute_uv=True, full_matrices=False)[1]
+    except np.linalg.LinAlgError:
+        Djac = np.zeros(len(jac))
+
     ret_dict['D_for'] = Djac
     ret_dict['jac_for'] = jac
     # inverse
