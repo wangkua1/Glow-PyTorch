@@ -424,7 +424,10 @@ def main(dataset, dataroot, download, augment, batch_size, eval_batch_size,
             plt.savefig(os.path.join(output_dir, f'sample_{engine.iter_ind}.png'))
 
         if engine.iter_ind  % eval_every==0:
-            torch.save(model, os.path.join(output_dir, f'ckpt_{engine.iter_ind}.pt'))
+            def check_all_zero_except_leading(x):
+                return x % 10**np.floor(np.log10(x))==0
+            if engine.iter_ind == 0 or check_all_zero_except_leading(engine.iter_ind):
+                torch.save(model.state_dict(), os.path.join(output_dir, f'ckpt_sd_{engine.iter_ind}.pt'))
 
             model.eval()
 

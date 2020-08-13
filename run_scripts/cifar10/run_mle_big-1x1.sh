@@ -13,7 +13,7 @@ for LR in 5e-4; do
 for bs in 64; do
 for LT in 0; do
 for h in 512; do
-for exp in 5 ; do
+for exp in 4 6; do
 AMS=0
 GP=0
 db=0
@@ -47,9 +47,16 @@ case "$exp" in
     c=naffine
     eps=0.5
 ;;
+6)
+    c=additive
+    eps=0
+    AMS=0
+    perm=invconv
+;;
 esac
 
 cmd="train.py  \
+    --fresh \
     --gan  \
     --dataset cifar10  \
     --L 3  \
@@ -92,7 +99,7 @@ sbatch <<< \
 #SBATCH --mem=16G
 #SBATCH -c 8
 #SBATCH --gres=gpu:1
-#SBATCH -p p100,t4
+#SBATCH -p gpu
 #SBATCH --time=200:00:00
 #SBATCH --output=/h/wangkuan/slurm/%j-out.txt
 #SBATCH --error=/h/wangkuan/slurm/%j-err.txt

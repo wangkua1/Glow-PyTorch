@@ -51,9 +51,13 @@ case "$exp" in
     GP=5
     db=1
 ;;
+7)
+    c=naffine
+    eps=0.5
+;;
 esac
 
-srun -p gpu --gres=gpu:1 --mem=10G \
+# srun -p gpu --gres=gpu:1 --mem=10G \
 python train.py  \
     --fresh  \
     --gan  \

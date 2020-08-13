@@ -78,7 +78,8 @@ def main(dataset, dataroot, download, augment, n_workers, eval_batch_size, outpu
     x = test_loader.__iter__().__next__()[0].to(device)
 
     # OOD data
-    ood_distributions = ['gaussian', 'rademacher', 'texture3', 'svhn','tinyimagenet','lsun']
+    ood_distributions = ['gaussian']
+    # ood_distributions = ['gaussian', 'rademacher', 'texture3', 'svhn','tinyimagenet','lsun']
     tr = transforms.Compose([])
     tr.transforms.append(transforms.ToPILImage()) 
     tr.transforms.append(transforms.Resize((32,32)))
@@ -91,8 +92,36 @@ def main(dataset, dataroot, download, augment, n_workers, eval_batch_size, outpu
                                   'n_anom': eval_batch_size,
                                 })]).to(device)
                         ) for out_name in ood_distributions]
-
-    model = torch.load(glow_path)
+    if 'sd' in glow_path:
+        with open(os.path.join(os.path.dirname(glow_path), 'hparams.json'), 'r') as f:
+            model_kwargs = json.load(f)
+        model = Glow(
+                (32, 32, 3), 
+                model_kwargs['hidden_channels'], 
+                model_kwargs['K'], 
+                model_kwargs['L'], 
+                model_kwargs['actnorm_scale'],
+                model_kwargs['flow_permutation'], 
+                model_kwargs['flow_coupling'], 
+                model_kwargs['LU_decomposed'], 
+                10,
+                model_kwargs['learn_top'], 
+                model_kwargs['y_condition'],
+                model_kwargs['logittransform'],
+                model_kwargs['sn'],
+                model_kwargs['affine_eps'],
+                model_kwargs['no_actnorm'],
+                model_kwargs['affine_scale_eps'], 
+                model_kwargs['actnorm_max_scale'], 
+                model_kwargs['no_conv_actnorm'],
+                model_kwargs['affine_max_scale'],
+                model_kwargs['actnorm_eps'],
+                model_kwargs['no_split']
+            )
+        model.load_state_dict(torch.load(glow_path))
+        model.set_actnorm_init()
+    else:
+        model = torch.load(glow_path)
     model = model.to(device)
     model.eval()
 
